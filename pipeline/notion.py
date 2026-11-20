@@ -105,3 +105,25 @@ def log_run(name, channel, target, done, result, notes=""):
         "Notes": text(config.redact(notes)),
     }
     return _req("POST", "/pages", json={"parent": {"database_id": config.RUNS_DB}, "properties": props})
+
+
+def log_checked(lead, result, reason="", had_email=False, had_whatsapp=False, score=None):
+    """One row per business checked, so every night's work can be audited."""
+    props = {
+        "Business": title(lead["name"]),
+        "Website": {"url": lead["website"]},
+        "Country": select(lead["country"]),
+        "City": text(lead["city"]),
+        "Niche": select(lead["niche"]),
+        "Result": select(result),
+        "Had email": {"checkbox": bool(had_email)},
+        "Had WhatsApp": {"checkbox": bool(had_whatsapp)},
+        "Reason": text(config.redact(reason)),
+        "Date": date(),
+    }
+    if score is not None:
+        props["Fit score"] = {"number": score}
+    try:
+        _req("POST", "/pages", json={"parent": {"database_id": config.CHECKED_DB}, "properties": props})
+    except Exception as e:  # the audit log must never stop the real work
+        print(f"[audit] could not log {lead['name']}: {config.redact(e)[:120]}")
