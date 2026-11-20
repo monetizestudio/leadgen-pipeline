@@ -1,0 +1,59 @@
+name: Send emails
+
+on:
+  schedule:
+    - cron: "30 22 * * *"   # Australia: 3:30 AM Karachi
+    - cron: "30 5 * * *"    # UAE: 10:30 AM Karachi
+    - cron: "30 8 * * *"    # UK: 1:30 PM Karachi
+    - cron: "30 14 * * *"   # US/Canada: 7:30 PM Karachi
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "Region to email"
+        required: true
+        type: choice
+        options: [australia, uae, uk, na]
+      max:
+        description: "Max new emails (blank = SEND_CAP_PER_RUN in config.py; use 2 for a test)"
+        required: false
+        default: ""
+
+concurrency:
+  group: send-emails
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      SENDER_ADDRESS: ${{ secrets.SENDER_ADDRESS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Send
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_REGION: ${{ github.event.inputs.region }}
+          INPUT_MAX: ${{ github.event.inputs.max }}
+        run: |
+          case "$SCHEDULE" in
+            "30 22 * * *") REGION=australia ;;
+            "30 5 * * *")  REGION=uae ;;
+            "30 8 * * *")  REGION=uk ;;
+            "30 14 * * *") REGION=na ;;
+            *)             REGION="$INPUT_REGION" ;;
+          esac
+          ARGS="--region $REGION"
+          if [ -n "$INPUT_MAX" ]; then ARGS="$ARGS --max $INPUT_MAX"; fi
+          echo "Running: python -m pipeline.send $ARGS"
+          python -m pipeline.send $ARGS
