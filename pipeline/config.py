@@ -24,6 +24,7 @@ def redact(text):
 # ---------- Notion databases (Lead Gen HQ) ----------
 LEADS_DB = "41e3ff41f39f81bc9a1cc6646c5ba814"
 RUNS_DB = "41e3ff41f39f8162bed5f2011e55ae06"
+CHECKED_DB = "41e3ff41f39f814ea83dc87b7123cc2f"   # audit log: every business checked
 
 # ---------- Targets ----------
 DAILY_TARGET = 100            # qualified leads with contact details per night
