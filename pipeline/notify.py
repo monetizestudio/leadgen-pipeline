@@ -5,6 +5,7 @@ from . import config
 
 
 def push(title, message, priority="default", tags=""):
+    title, message = config.redact(title), config.redact(message)
     if not config.NTFY_TOPIC:
         print(f"[notify] {title}: {message}")
         return
