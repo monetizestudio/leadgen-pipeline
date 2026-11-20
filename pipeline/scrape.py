@@ -9,8 +9,6 @@ from bs4 import BeautifulSoup
 from . import config
 
 UA = {"User-Agent": "MonetizeStudioLeadFinder/1.0 (contact: monetizestudio.github.io)"}
-NOMINATIM = "https://nominatim.openstreetmap.org/search"
-OVERPASS = "https://overpass-api.de/api/interpreter"
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 WA_RE = re.compile(r"(?:wa\.me/|api\.whatsapp\.com/send\?phone=|whatsapp\.com/send\?phone=)\+?(\d{8,15})")
@@ -57,36 +55,47 @@ def extract_contacts(html, site=""):
     return emails, was, text
 
 
-def geocode(city, country):
-    r = requests.get(NOMINATIM, params={"q": f"{city}, {country}", "format": "json", "limit": 1},
-                     headers=UA, timeout=30)
-    r.raise_for_status()
-    time.sleep(1.1)  # Nominatim policy: max 1 request/second
-    data = r.json()
-    if not data:
-        return None
-    s, n, w, e = (float(x) for x in data[0]["boundingbox"])
-    return s, w, n, e
+OVERPASS_SERVERS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
 
 
-def overpass_businesses(bbox):
-    s, w, n, e = bbox
+def overpass_businesses(lat, lon, radius=None):
+    """Businesses in our niches within `radius` metres of a city centre that list a website.
+    Tries each free Overpass server in turn; raises if all of them fail."""
+    radius = radius or config.SEARCH_RADIUS_M
+    around = f"(around:{radius},{lat},{lon})"
     parts = "".join(
-        f'nwr["{k}"="{v}"][~"^(website|contact:website)$"~"."]({s},{w},{n},{e});'
+        f'nwr["{k}"="{v}"][~"^(website|contact:website)$"~"."]{around};'
         for k, v, _ in config.OSM_TAGS
     )
     q = f"[out:json][timeout:90];({parts});out center tags 400;"
-    for attempt in range(3):
-        r = requests.post(OVERPASS, data={"data": q}, headers=UA, timeout=120)
-        if r.status_code in (429, 504):
-            time.sleep(30 * (attempt + 1))
-            continue
-        r.raise_for_status()
-        break
-    else:
-        return []
+    last_err = "no server answered"
+    data = None
+    for server in OVERPASS_SERVERS:
+        for attempt in range(2):
+            try:
+                r = requests.post(server, data={"data": q}, headers=UA, timeout=120)
+            except requests.RequestException as e:
+                last_err = f"{server}: {e}"
+                break
+            if r.status_code in (429, 502, 503, 504):
+                last_err = f"{server}: HTTP {r.status_code}"
+                time.sleep(15 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                last_err = f"{server}: HTTP {r.status_code}"
+                break
+            data = r.json()
+            break
+        if data is not None:
+            break
+    if data is None:
+        raise RuntimeError(f"OpenStreetMap search failed ({last_err})")
     out = []
-    for el in r.json().get("elements", []):
+    for el in data.get("elements", []):
         tags = el.get("tags", {})
         niche = next((nm for k, v, nm in config.OSM_TAGS if tags.get(k) == v), None)
         site = normalize_site(tags.get("website") or tags.get("contact:website"))
@@ -98,7 +107,7 @@ def overpass_businesses(bbox):
             "niche": niche,
             "osm_email": tags.get("email") or tags.get("contact:email") or "",
         })
-    time.sleep(5)  # be gentle with the free Overpass server
+    time.sleep(5)  # be gentle with the free Overpass servers
     return out
 
 
