@@ -59,4 +59,22 @@ def test_build_props_prefers_whatsapp():
 def test_city_rotation_covers_all():
     cities = find.tonight_cities()
     assert len(cities) == sum(len(v) for v in config.CITIES.values())
-    assert len(set(cities)) == len(cities)
+    assert len({c[1] for c in cities}) == len(cities)
+    for country, city, (lat, lon) in cities:
+        assert -90 < lat < 90 and -180 < lon < 180
+
+
+def test_redact_hides_keys():
+    config.GEMINI_API_KEY = "AQ.secret123"
+    msg = config.redact("404 for url: https://x/models/m:generateContent?key=AQ.secret123")
+    assert "secret123" not in msg and "key=***" in msg
+    assert "secret" not in config.redact("token AQ.secret123 leaked")
+    config.GEMINI_API_KEY = ""
+
+
+def test_pick_model_newest_flash():
+    names = ["gemini-2.0-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.5-pro",
+             "gemini-3.8-flash-preview-09", "gemini-3.5-flash-image", "text-embedding-004"]
+    assert ai.pick_model(names) == "gemini-3.5-flash"
+    assert ai.pick_model(["gemini-4.0-flash-preview"]) == "gemini-4.0-flash-preview"
+    assert ai.pick_model(["gemini-3.5-pro"]) is None
