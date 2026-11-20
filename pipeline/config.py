@@ -1,5 +1,6 @@
 """All settings for the Monetize Studio directory pipeline. Edit this file to change targets."""
 import os
+import re
 
 # ---------- Secrets (set as GitHub Actions secrets, never commit them) ----------
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
@@ -10,6 +11,15 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "")
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 SENDER_NAME = os.environ.get("SENDER_NAME", "Azeem Danish")
 SENDER_ADDRESS = os.environ.get("SENDER_ADDRESS", "Monetize Studio, Karachi, Pakistan")
+
+
+def redact(text):
+    """Remove secrets from any text before it is logged to Notion, ntfy or the console."""
+    text = str(text)
+    for secret in (GEMINI_API_KEY, NOTION_TOKEN, GMAIL_APP_PASSWORD):
+        if secret:
+            text = text.replace(secret, "***")
+    return re.sub(r"key=[A-Za-z0-9._\-]+", "key=***", text)
 
 # ---------- Notion databases (Lead Gen HQ) ----------
 LEADS_DB = "41e3ff41f39f81bc9a1cc6646c5ba814"
@@ -25,14 +35,22 @@ SEND_DELAY_SEC = (45, 110)    # random pause between emails
 GEMINI_DELAY_SEC = 7          # pause between AI calls (free tier rate limit)
 
 # ---------- Countries and cities (rotated each night) ----------
-CITIES = {
-    "UAE": ["Dubai", "Abu Dhabi", "Sharjah"],
-    "UK": ["London", "Manchester", "Birmingham", "Leeds", "Bristol", "Glasgow", "Liverpool", "Edinburgh"],
-    "US": ["New York", "Los Angeles", "Houston", "Dallas", "Miami", "Chicago", "Phoenix",
-           "Atlanta", "San Diego", "Austin", "Denver", "Seattle", "Charlotte", "Tampa"],
-    "Canada": ["Toronto", "Vancouver", "Calgary", "Ottawa", "Edmonton", "Mississauga"],
-    "Australia": ["Sydney", "Melbourne", "Brisbane", "Perth", "Adelaide", "Gold Coast"],
+CITIES = {  # city -> (latitude, longitude) of the centre; search radius below
+    "UAE": {"Dubai": (25.2048, 55.2708), "Abu Dhabi": (24.4539, 54.3773), "Sharjah": (25.3463, 55.4209)},
+    "UK": {"London": (51.5074, -0.1278), "Manchester": (53.4808, -2.2426), "Birmingham": (52.4862, -1.8904),
+           "Leeds": (53.8008, -1.5491), "Bristol": (51.4545, -2.5879), "Glasgow": (55.8642, -4.2518),
+           "Liverpool": (53.4084, -2.9916), "Edinburgh": (55.9533, -3.1883)},
+    "US": {"New York": (40.7128, -74.0060), "Los Angeles": (34.0522, -118.2437), "Houston": (29.7604, -95.3698),
+           "Dallas": (32.7767, -96.7970), "Miami": (25.7617, -80.1918), "Chicago": (41.8781, -87.6298),
+           "Phoenix": (33.4484, -112.0740), "Atlanta": (33.7490, -84.3880), "San Diego": (32.7157, -117.1611),
+           "Austin": (30.2672, -97.7431), "Denver": (39.7392, -104.9903), "Seattle": (47.6062, -122.3321),
+           "Charlotte": (35.2271, -80.8431), "Tampa": (27.9506, -82.4572)},
+    "Canada": {"Toronto": (43.6532, -79.3832), "Vancouver": (49.2827, -123.1207), "Calgary": (51.0447, -114.0719),
+               "Ottawa": (45.4215, -75.6972), "Edmonton": (53.5461, -113.4938), "Mississauga": (43.5890, -79.6441)},
+    "Australia": {"Sydney": (-33.8688, 151.2093), "Melbourne": (-37.8136, 144.9631), "Brisbane": (-27.4698, 153.0251),
+                  "Perth": (-31.9505, 115.8605), "Adelaide": (-34.9285, 138.6007), "Gold Coast": (-28.0167, 153.4000)},
 }
+SEARCH_RADIUS_M = 20000
 CITIES_PER_NIGHT = 6
 
 # Regional send runs -> which countries they email (each fires at that region's morning)
