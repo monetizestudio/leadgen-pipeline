@@ -31,8 +31,13 @@ DAILY_TARGET = 100            # qualified leads with contact details per night
 MAX_CANDIDATES = 600          # stop checking after this many businesses
 MIN_FIT_SCORE = 6             # 1-10, AI fit score needed to qualify
 FIND_TIME_LIMIT_MIN = 150     # stop the find run after this many minutes
-SEND_CAP_PER_RUN = 45         # max first emails per regional send run
-SEND_DELAY_SEC = (45, 110)    # random pause between emails
+DAILY_EMAIL_CAP = 300         # all emails per day (first emails + follow-ups), after warm-up
+WARMUP_START = "2026-11-21"   # first sending day
+WARMUP_DAYS = 28              # ramps from WARMUP_FIRST_DAY up to DAILY_EMAIL_CAP over this many days (0 = off)
+WARMUP_FIRST_DAY = 30
+SEND_DELAY_SEC = (60, 120)    # random pause between emails: 1-2 minutes
+SEND_RUNS_PER_DAY = 4         # Australia, UAE, UK, US/Canada share the daily cap
+MAX_QUEUE_DAYS = 3            # finder skips a night if unsent email leads > this many days of sending
 GEMINI_DELAY_SEC = 7          # pause between AI calls (free tier rate limit)
 
 # ---------- Countries and cities (rotated each night) ----------
@@ -122,3 +127,20 @@ WHATSAPP_1 = ("Hi {first_name}, Azeem here from Monetize Studio. Came across {co
               "Would a free 2-min audit of your Instagram be useful?")
 
 FOLLOWUP_GAP_DAYS = {2: 3, 3: 4}   # touch number -> days after previous touch
+
+
+def daily_email_cap(today=None):
+    import datetime as _dt
+    today = today or _dt.date.today()
+    if WARMUP_DAYS <= 0:
+        return DAILY_EMAIL_CAP
+    day = (today - _dt.date.fromisoformat(WARMUP_START)).days
+    if day < 0:
+        return WARMUP_FIRST_DAY
+    if day >= WARMUP_DAYS:
+        return DAILY_EMAIL_CAP
+    return int(WARMUP_FIRST_DAY + (DAILY_EMAIL_CAP - WARMUP_FIRST_DAY) * day / WARMUP_DAYS)
+
+
+def per_run_cap(today=None):
+    return -(-daily_email_cap(today) // SEND_RUNS_PER_DAY)   # round up
