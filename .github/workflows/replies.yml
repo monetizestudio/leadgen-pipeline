@@ -18,6 +18,8 @@ jobs:
       GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      BOOKING_LINK: ${{ secrets.BOOKING_LINK }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
