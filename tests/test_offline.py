@@ -75,6 +75,70 @@ def test_redact_hides_keys():
 def test_pick_model_newest_flash():
     names = ["gemini-2.0-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.5-pro",
              "gemini-3.8-flash-preview-09", "gemini-3.5-flash-image", "text-embedding-004"]
-    assert ai.pick_model(names) == "gemini-3.5-flash"
+    assert ai.pick_model(names) == "gemini-3.5-flash"   # stable beats newer preview
+    assert ai.pick_model(names + ["gemini-flash-latest"]) == "gemini-flash-latest"
+    ranked = ai.rank_models(names)
+    assert ranked.index("gemini-3.8-flash-preview-09") > ranked.index("gemini-3.5-flash-lite")
     assert ai.pick_model(["gemini-4.0-flash-preview"]) == "gemini-4.0-flash-preview"
     assert ai.pick_model(["gemini-3.5-pro"]) is None
+
+
+def test_verdict_labels():
+    base = {"english": True, "in_niche": True, "medium_sized": True, "size": "medium",
+            "fit_score": 8, "observation": "x", "fit_notes": "ok"}
+    assert ai.verdict(base)[0] == "Qualified"
+    assert ai.verdict({**base, "english": False})[0] == "Not English"
+    assert ai.verdict({**base, "in_niche": False})[0] == "Not in niche"
+    assert ai.verdict({**base, "medium_sized": False, "size": "large"})[0] == "Too big"
+    assert ai.verdict({**base, "medium_sized": False, "size": "small"})[0] == "Too small"
+    assert ai.verdict({**base, "fit_score": 3})[0] == "Low score"
+    assert ai.verdict(None)[0] == "AI error"
+
+
+def test_reply_body_strips_quoted_thread():
+    from email.message import EmailMessage
+    from pipeline import replies
+    m = EmailMessage()
+    m.set_content("Yes, send me details please.\n\nOn Mon, Azeem wrote:\n> Hi there, old message")
+    assert replies._body(m) == "Yes, send me details please."
+
+
+def test_calendly_invitee_detection():
+    from email.message import EmailMessage
+    from pipeline import replies, config as cfg
+    cfg.GMAIL_ADDRESS = "me@gmail.com"
+    m = EmailMessage()
+    m["From"] = "Calendly <notifications@calendly.com>"
+    m["Subject"] = "New Event: Omar Khan - 03:00pm Mon, Nov 23, 2026 - 15 Minute Meeting"
+    body = "Invitee: Omar Khan\nInvitee Email: omar@arcstudio.ae\nEvent Date/Time: ..."
+    assert replies._calendly_invitee(m, body) == "omar@arcstudio.ae"
+    m2 = EmailMessage(); m2["From"] = "omar@arcstudio.ae"; m2["Subject"] = "Re: hi"
+    assert replies._calendly_invitee(m2, body) is None
+
+
+def test_call_falls_back_on_timeout_and_503(monkeypatch):
+    import requests as rq
+    calls = []
+
+    class R:
+        def __init__(self, code):
+            self.status_code, self.text = code, ""
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "{}"}]}}]}
+
+    def fake_post(url, **kw):
+        calls.append(url)
+        if "bad-slow" in url:
+            raise rq.Timeout("slow")
+        if "bad-busy" in url:
+            return R(503)
+        return R(200)
+
+    monkeypatch.setattr(ai.requests, "post", fake_post)
+    monkeypatch.setattr(ai.time, "sleep", lambda s: None)
+    ai._candidates[:] = ["gemini-bad-slow", "gemini-bad-busy", "gemini-flash-latest"]
+    assert ai._call("hi")["candidates"]
+    assert ai._candidates[0] == "gemini-flash-latest"      # remembered for next calls
+    assert any("bad-slow" in c for c in calls) and any("bad-busy" in c for c in calls)
+    ai._candidates[:] = []
