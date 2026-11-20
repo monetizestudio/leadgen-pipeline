@@ -115,7 +115,7 @@ def main():
         run(args.region, args.max)
     except Exception as e:
         traceback.print_exc()
-        notify.push(f"Send {args.region} FAILED", str(e)[:300], priority="high", tags="warning")
+        notify.push(f"Send {args.region} FAILED", config.redact(e)[:300], priority="high", tags="warning")
         raise
 
 
