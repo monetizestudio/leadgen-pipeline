@@ -111,9 +111,9 @@ def qualify(lead, site_text):
         return res
     except (requests.RequestException, KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
         _fails += 1
-        print(f"[ai] could not check {lead['name']}: {str(e)[:150]}")
+        print(f"[ai] could not check {lead['name']}: {config.redact(e)[:150]}")
         if _fails >= MAX_CONSECUTIVE_FAILS:
-            raise RuntimeError(f"Gemini failed {_fails} times in a row. Last error: {str(e)[:200]}")
+            raise RuntimeError(f"Gemini failed {_fails} times in a row. Last error: {config.redact(e)[:200]}")
         return None
     finally:
         time.sleep(config.GEMINI_DELAY_SEC)
