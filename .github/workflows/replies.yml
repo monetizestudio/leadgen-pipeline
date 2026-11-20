@@ -1,0 +1,29 @@
+name: Check replies
+
+on:
+  schedule:
+    - cron: "15 */2 * * *"   # every 2 hours
+  workflow_dispatch:
+
+concurrency:
+  group: check-replies
+  cancel-in-progress: false
+
+jobs:
+  replies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+      GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Check Gmail for replies and bounces
+        run: python -m pipeline.replies
