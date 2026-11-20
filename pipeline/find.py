@@ -12,7 +12,7 @@ from . import ai, config, messages, notion, notify, scrape
 
 
 def tonight_cities():
-    flat = [(country, city) for country, cities in config.CITIES.items() for city in cities]
+    flat = [(country, city, ll) for country, cities in config.CITIES.items() for city, ll in cities.items()]
     start = (dt.date.today().toordinal() * config.CITIES_PER_NIGHT) % len(flat)
     # all cities, starting at tonight's offset, so we keep going if early cities run dry
     return flat[start:] + flat[:start]
@@ -52,17 +52,19 @@ def run(limit):
     found, checked, no_contact, rejected = 0, 0, 0, 0
     by_channel = {"Email": 0, "WhatsApp": 0}
     seen = set()
+    city_errors = []
 
-    for country, city in tonight_cities():
+    for country, city, (lat, lon) in tonight_cities():
         if found >= limit or checked >= config.MAX_CANDIDATES:
             break
         if (time.time() - started) / 60 > config.FIND_TIME_LIMIT_MIN:
             break
         try:
-            bbox = scrape.geocode(city, country)
-            businesses = scrape.overpass_businesses(bbox) if bbox else []
+            businesses = scrape.overpass_businesses(lat, lon)
+            print(f"{city}: {len(businesses)} businesses with websites")
         except Exception as e:  # one city failing shouldn't stop the night
-            print(f"skip {city}: {e}")
+            city_errors.append(f"{city}: {config.redact(e)[:120]}")
+            print(f"skip {city_errors[-1]}")
             continue
         for biz in businesses:
             if found >= limit or checked >= config.MAX_CANDIDATES:
@@ -101,9 +103,14 @@ def run(limit):
     result = "Done" if found >= limit else ("Partial" if found else "Failed")
     notes = (f"Checked {checked}, no contact {no_contact}, not a fit {rejected}. "
              f"Email {by_channel['Email']}, WhatsApp {by_channel['WhatsApp']}. {mins} min.")
+    if city_errors:
+        notes += f" Cities failed: {len(city_errors)} (e.g. {city_errors[0]})"
     notion.log_run(f"Directories find {dt.date.today()}", "Directories find", limit, found, result, notes)
     notify.push("Directories: leads found", f"{found}/{limit} qualified leads queued. {notes}",
                 tags="mag")
+    if checked == 0:
+        # nothing could even be checked: make the GitHub run go red so it's noticed
+        raise RuntimeError("No businesses could be checked. " + notes)
 
 
 def main():
@@ -114,11 +121,12 @@ def main():
         run(args.limit)
     except Exception as e:
         traceback.print_exc()
-        try:
-            notion.log_run(f"Directories find {dt.date.today()}", "Directories find", args.limit, 0,
-                           "Failed", f"Error: {e}")
-        finally:
-            notify.push("Directories find FAILED", str(e)[:300], priority="high", tags="warning")
+        if "No businesses could be checked" not in str(e):  # that case is already logged above
+            try:
+                notion.log_run(f"Directories find {dt.date.today()}", "Directories find", args.limit, 0,
+                               "Failed", f"Error: {config.redact(e)[:500]}")
+            finally:
+                notify.push("Directories find FAILED", config.redact(e)[:300], priority="high", tags="warning")
         raise
 
 
