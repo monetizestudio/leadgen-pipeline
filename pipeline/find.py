@@ -49,13 +49,15 @@ def build_props(lead, res, contacts):
 
 def run(limit):
     started = time.time()
-    found, checked, no_contact, rejected = 0, 0, 0, 0
+    c = {"cities": 0, "found": 0, "checked": 0, "no_contact": 0, "duplicate": 0, "thin": 0,
+         "had_contact": 0, "rejected": 0, "qualified": 0}
+    reject_reasons = {}
     by_channel = {"Email": 0, "WhatsApp": 0}
     seen = set()
     city_errors = []
 
     for country, city, (lat, lon) in tonight_cities():
-        if found >= limit or checked >= config.MAX_CANDIDATES:
+        if c["qualified"] >= limit or c["checked"] >= config.MAX_CANDIDATES:
             break
         if (time.time() - started) / 60 > config.FIND_TIME_LIMIT_MIN:
             break
@@ -66,49 +68,65 @@ def run(limit):
             city_errors.append(f"{city}: {config.redact(e)[:120]}")
             print(f"skip {city_errors[-1]}")
             continue
+        c["cities"] += 1
+        c["found"] += len(businesses)
         for biz in businesses:
-            if found >= limit or checked >= config.MAX_CANDIDATES:
+            if c["qualified"] >= limit or c["checked"] >= config.MAX_CANDIDATES:
                 break
             if biz["website"] in seen:
                 continue
             seen.add(biz["website"])
             lead = {**biz, "city": city, "country": country}
-            checked += 1
 
             site = scrape.fetch_site(lead["website"])
             if biz["osm_email"]:
                 site["emails"] = scrape.clean_emails([biz["osm_email"]] + site["emails"], lead["website"])
-            if not (site["emails"] or site["whatsapp"]):
-                no_contact += 1          # rule: no contact details = doesn't count
-                continue
             email = site["emails"][0] if site["emails"] else ""
             if notion.lead_exists(lead["website"], email):
-                continue                 # already in Notion, never contact twice
+                c["duplicate"] += 1      # already in Leads: never contact twice, not logged again
+                continue
+            c["checked"] += 1
+            has_e, has_w = bool(site["emails"]), bool(site["whatsapp"])
+            if not (has_e or has_w):
+                c["no_contact"] += 1     # rule: no contact details = doesn't count
+                notion.log_checked(lead, "No contact", "No email or WhatsApp on website or map listing")
+                continue
+            c["had_contact"] += 1
             if len(site["text"]) < 200:
-                rejected += 1
+                c["thin"] += 1
+                notion.log_checked(lead, "Thin website", "Website had too little text to judge",
+                                   has_e, has_w)
                 continue
 
             res = ai.qualify(lead, site["text"])
-            if not ai.is_qualified(res):
-                rejected += 1
+            label, reason = ai.verdict(res)
+            score = int(res.get("fit_score", 0) or 0) if res else None
+            notion.log_checked(lead, label, reason, has_e, has_w, score)
+            if label != "Qualified":
+                c["rejected"] += 1
+                reject_reasons[label] = reject_reasons.get(label, 0) + 1
                 continue
 
             props, channel = build_props(lead, res, site)
             notion.create_lead(props)
-            found += 1
+            c["qualified"] += 1
             by_channel[channel] += 1
-            print(f"[{found}/{limit}] {lead['name']} ({city}) via {channel}")
+            print(f"[{c['qualified']}/{limit}] {lead['name']} ({city}) via {channel}")
 
     mins = int((time.time() - started) / 60)
+    found = c["qualified"]
     result = "Done" if found >= limit else ("Partial" if found else "Failed")
-    notes = (f"Checked {checked}, no contact {no_contact}, not a fit {rejected}. "
-             f"Email {by_channel['Email']}, WhatsApp {by_channel['WhatsApp']}. {mins} min.")
+    rejects = ", ".join(f"{k} {v}" for k, v in sorted(reject_reasons.items(), key=lambda x: -x[1])) or "none"
+    notes = (f"Funnel: {c['cities']} cities searched > {c['found']} businesses with websites > "
+             f"{c['checked']} checked > {c['had_contact']} had contact > {found} qualified. "
+             f"Queued: Email {by_channel['Email']}, WhatsApp {by_channel['WhatsApp']}. "
+             f"Rejected by AI: {rejects}. No contact {c['no_contact']}, thin site {c['thin']}, "
+             f"already in Leads {c['duplicate']}. {mins} min.")
     if city_errors:
         notes += f" Cities failed: {len(city_errors)} (e.g. {city_errors[0]})"
     notion.log_run(f"Directories find {dt.date.today()}", "Directories find", limit, found, result, notes)
-    notify.push("Directories: leads found", f"{found}/{limit} qualified leads queued. {notes}",
-                tags="mag")
-    if checked == 0:
+    notify.push("Directories: leads found", f"{found}/{limit} qualified. {notes}", tags="mag")
+    if c["checked"] == 0:
         # nothing could even be checked: make the GitHub run go red so it's noticed
         raise RuntimeError("No businesses could be checked. " + notes)
 
