@@ -142,3 +142,13 @@ def test_call_falls_back_on_timeout_and_503(monkeypatch):
     assert ai._candidates[0] == "gemini-flash-latest"      # remembered for next calls
     assert any("bad-slow" in c for c in calls) and any("bad-busy" in c for c in calls)
     ai._candidates[:] = []
+
+
+def test_warmup_ramp():
+    import datetime as d
+    start = d.date.fromisoformat(config.WARMUP_START)
+    assert config.daily_email_cap(start) == config.WARMUP_FIRST_DAY
+    mid = config.daily_email_cap(start + d.timedelta(days=14))
+    assert config.WARMUP_FIRST_DAY < mid < config.DAILY_EMAIL_CAP
+    assert config.daily_email_cap(start + d.timedelta(days=40)) == config.DAILY_EMAIL_CAP
+    assert config.per_run_cap(start + d.timedelta(days=40)) == 75
