@@ -14,7 +14,7 @@ on:
         type: choice
         options: [australia, uae, uk, na]
       max:
-        description: "Max new emails (blank = SEND_CAP_PER_RUN in config.py; use 2 for a test)"
+        description: "Max emails this run (blank = today's warm-up cap; use 2 for a test)"
         required: false
         default: ""
 
