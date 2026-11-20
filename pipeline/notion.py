@@ -102,6 +102,6 @@ def log_run(name, channel, target, done, result, notes=""):
         "Target": {"number": target},
         "Done": {"number": done},
         "Result": select(result),
-        "Notes": text(notes),
+        "Notes": text(config.redact(notes)),
     }
     return _req("POST", "/pages", json={"parent": {"database_id": config.RUNS_DB}, "properties": props})
