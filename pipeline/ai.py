@@ -15,7 +15,6 @@ from . import config
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 SKIP_WORDS = ("image", "tts", "audio", "live", "embedding", "vision", "exp", "learnlm", "computer")
-_model = None
 _fails = 0
 MAX_CONSECUTIVE_FAILS = 8
 
@@ -35,7 +34,8 @@ Reply with JSON only, these keys:
 - "english": true if the business communicates in English
 - "in_niche": true if it really is a {niche} business (architecture, interiors, kitchens, bathrooms, tiles,
   remodeling, or real estate)
-- "medium_sized": true/false by the definition above
+- "size": "small", "medium" or "large" by the definition above
+- "medium_sized": true only if size is "medium"
 - "fit_score": integer 1-10, how good a client this would be for Meta ads + video content
 - "fit_notes": one short line explaining the score (size signals, what they lack)
 - "first_name": the owner's/founder's/principal's first name ONLY if clearly stated on the site, else ""
@@ -50,52 +50,88 @@ def _version(name):
     return float(m.group(1)) if m else 0.0
 
 
-def pick_model(names):
-    """Choose the newest stable Flash model from a list of model names."""
+def rank_models(names):
+    """Order Flash models from most to least reliable:
+    Google's stable 'latest' aliases first, then stable versions (newest first, full Flash before Lite),
+    then previews last."""
     flash = [n for n in names if "flash" in n and not any(w in n for w in SKIP_WORDS)]
-    if not flash:
-        return None
-    stable = [n for n in flash if "preview" not in n] or flash
-    # newest version first; prefer full Flash over Flash-Lite; prefer short canonical names
-    stable.sort(key=lambda n: (-_version(n), "lite" in n, len(n)))
-    return stable[0]
+    aliases = [n for n in ("gemini-flash-latest", "gemini-flash-lite-latest") if n in flash]
+    rest = [n for n in flash if n not in aliases]
+    stable = sorted([n for n in rest if "preview" not in n], key=lambda n: (-_version(n), "lite" in n, len(n)))
+    previews = sorted([n for n in rest if "preview" in n], key=lambda n: (-_version(n), "lite" in n, len(n)))
+    return aliases + stable + previews
+
+
+def pick_model(names):
+    ranked = rank_models(names)
+    return ranked[0] if ranked else None
+
+
+_candidates = []
+
+
+def candidates():
+    """Models to try, best first. A GEMINI_MODEL secret, if set, goes to the front."""
+    global _candidates
+    if _candidates:
+        return _candidates
+    forced = os.environ.get("GEMINI_MODEL", "").strip()
+    names = []
+    try:
+        r = requests.get(f"{BASE}/models", params={"key": config.GEMINI_API_KEY, "pageSize": 200}, timeout=30)
+        r.raise_for_status()
+        names = [m["name"].removeprefix("models/") for m in r.json().get("models", [])
+                 if "generateContent" in m.get("supportedGenerationMethods", [])]
+    except requests.RequestException as e:
+        print(f"[ai] could not list models: {config.redact(e)[:120]}")
+    ranked = rank_models(names) or ["gemini-flash-latest", "gemini-flash-lite-latest"]
+    _candidates = ([forced] if forced else []) + [n for n in ranked if n != forced]
+    print(f"[ai] model order: {', '.join(_candidates[:5])}")
+    return _candidates
+
+
+def _promote(model):
+    """Remember a model that just worked so the next calls start with it."""
+    if _candidates and _candidates[0] != model:
+        _candidates.remove(model)
+        _candidates.insert(0, model)
+        print(f"[ai] now using {model}")
 
 
 def resolve_model(force=False):
-    global _model
-    if _model and not force:
-        return _model
-    forced = os.environ.get("GEMINI_MODEL", "").strip()
-    if forced and not force:
-        _model = forced
-        return _model
-    r = requests.get(f"{BASE}/models", params={"key": config.GEMINI_API_KEY, "pageSize": 200}, timeout=30)
-    r.raise_for_status()
-    names = [m["name"].removeprefix("models/") for m in r.json().get("models", [])
-             if "generateContent" in m.get("supportedGenerationMethods", [])]
-    _model = pick_model(names) or "gemini-flash-latest"
-    print(f"[ai] using model {_model}")
-    return _model
+    return candidates()[0]
 
 
 def _call(prompt):
+    """Try each model in turn. Timeouts, overload (429/5xx) and retired models (404) move on to
+    the next model instead of failing the lead."""
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.4},
     }
-    for attempt in range(4):
-        url = f"{BASE}/models/{resolve_model()}:generateContent"
-        r = requests.post(url, params={"key": config.GEMINI_API_KEY}, json=body, timeout=90)
-        if r.status_code == 404:          # model retired/renamed: pick again
-            resolve_model(force=True)
-            continue
-        if r.status_code in (429, 500, 503):
-            time.sleep(20 * (attempt + 1))
-            continue
-        r.raise_for_status()
-        return r.json()
-    r.raise_for_status()
-    return None
+    last = "no model answered"
+    for model in list(candidates())[:4]:
+        for attempt in range(2):
+            try:
+                r = requests.post(f"{BASE}/models/{model}:generateContent",
+                                  params={"key": config.GEMINI_API_KEY}, json=body, timeout=60)
+            except (requests.Timeout, requests.ConnectionError) as e:
+                last = f"{model}: {type(e).__name__}"
+                time.sleep(5)
+                continue
+            if r.status_code == 404:
+                last = f"{model}: 404 not found"
+                break                                   # retired: next model
+            if r.status_code in (429, 500, 502, 503, 504):
+                last = f"{model}: HTTP {r.status_code}"
+                time.sleep(10 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                last = f"{model}: HTTP {r.status_code} {r.text[:120]}"
+                break
+            _promote(model)
+            return r.json()
+    raise requests.RequestException(f"All models failed (last: {config.redact(last)})")
 
 
 def qualify(lead, site_text):
@@ -117,6 +153,22 @@ def qualify(lead, site_text):
         return None
     finally:
         time.sleep(config.GEMINI_DELAY_SEC)
+
+
+def verdict(res):
+    """(result label for the audit log, reason) for an AI answer."""
+    if not res:
+        return "AI error", "Gemini could not check this one"
+    notes = res.get("fit_notes", "")
+    if not res.get("english"):
+        return "Not English", notes
+    if not res.get("in_niche"):
+        return "Not in niche", notes
+    if not res.get("medium_sized"):
+        return ("Too big" if str(res.get("size", "")).lower() == "large" else "Too small"), notes
+    if int(res.get("fit_score", 0) or 0) < config.MIN_FIT_SCORE or not res.get("observation"):
+        return "Low score", notes
+    return "Qualified", notes
 
 
 def is_qualified(res):
