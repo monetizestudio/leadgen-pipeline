@@ -49,6 +49,16 @@ def build_props(lead, res, contacts):
 
 def run(limit):
     started = time.time()
+    backlog = len(notion.query(config.LEADS_DB, {"and": [
+        {"property": "Status", "select": {"equals": "Queued"}},
+        {"property": "Channel", "select": {"equals": "Email"}}]}))
+    room = config.daily_email_cap() * config.MAX_QUEUE_DAYS - backlog
+    if room <= 0:
+        msg = f"Skipped: {backlog} email leads still waiting to be sent (more than {config.MAX_QUEUE_DAYS} days' worth)."
+        notion.log_run(f"Directories find {dt.date.today()}", "Directories find", limit, 0, "Done", msg)
+        notify.push("Directories: no new search tonight", msg, tags="pause_button")
+        return
+    limit = min(limit, room)
     c = {"cities": 0, "found": 0, "checked": 0, "no_contact": 0, "duplicate": 0, "thin": 0,
          "had_contact": 0, "rejected": 0, "qualified": 0}
     reject_reasons = {}
