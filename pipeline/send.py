@@ -103,7 +103,7 @@ def run(region, max_new=None):
     wa_saved = len(whatsapp)
     email_owed = owed - wa_saved
     to_email = min(email_owed, len(queued))
-    notify.push(f"🚀 {region.upper()} outreach started",
+    notify.fyi(f"🚀 {region.upper()} outreach started",
                 f"{wa_saved} WhatsApp leads saved for Sunday, now sending {to_email} emails "
                 f"and {len(followups)} follow-ups ({sent_before}/{goal} were already done today). "
                 f"About {(to_email + len(followups)) * 3 // 2} min.", tags="rocket")
@@ -182,11 +182,11 @@ def run(region, max_new=None):
         notes = f"GMAIL PAUSED SENDING, stopped to protect the account: {paused}. " + notes
     notion.log_run(f"Send {region} {today}", "Directories send", goal, total_new, result, notes)
     if paused:
-        notify.push("⛔ Gmail limit hit, sending paused", notes, priority="urgent", tags="no_entry")
+        notify.action("Gmail limit hit, sending paused", notes, tags="no_entry")
     else:
         flag = "⚠️ " if short else "✉️ "
-        notify.push(f"{flag}{region.upper()} done {total_new}/{goal}: {sent_new} emails + {wa_saved} WhatsApp",
-                    notes, tags="email")
+        notify.fyi(f"{flag}{region.upper()} done {total_new}/{goal}: {sent_new} emails + {wa_saved} WhatsApp",
+                   notes, tags="email")
 
 
 def main():
@@ -198,7 +198,7 @@ def main():
         run(args.region, args.max)
     except Exception as e:
         traceback.print_exc()
-        notify.push(f"Send {args.region} FAILED", config.redact(e)[:300], priority="high", tags="warning")
+        notify.fyi(f"⚠️ {args.region.upper()} email run crashed (Claude will check)", "Nothing for you to do. " + config.redact(e)[:250], tags="warning")
         raise
 
 

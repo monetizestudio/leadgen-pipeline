@@ -226,8 +226,8 @@ def run():
                 notion.update_page(page["id"], {"Status": notion.select("Meeting"),
                                                 "Next follow-up": {"date": None}})
                 meetings.append(name)
-                notify.push(f"📅 Zoom booked: {name}", f"{invitee} booked a call. Check your calendar.",
-                            priority="urgent", tags="calendar")
+                notify.action(f"Zoom booked with {name}", f"{invitee} booked a call. Check your calendar and prepare.",
+                              tags="calendar")
             continue
 
         if "mailer-daemon" in sender or "postmaster" in sender:
@@ -274,7 +274,7 @@ def run():
                     "Last touch": notion.date(),
                     "Next follow-up": notion.date(dt.date.today() + dt.timedelta(days=3))})
                 auto.append(name)
-                notify.push(f"🔥 {name} replied, booking link sent", summary, priority="high", tags="fire")
+                notify.fyi(f"🔥 {name} replied, booking link sent (nothing to do)", summary, tags="fire")
                 continue
             except Exception as e:
                 print(f"[replies] auto-send failed for {sender}: {config.redact(e)[:120]}")
@@ -288,7 +288,9 @@ def run():
         except Exception:
             note = "Needs you: reply from Gmail."
         held.append(name)
-        notify.push(f"⚠️ {name} replied ({intent})", f"{summary}\n{note}", priority="high", tags="warning")
+        if len(body.strip()) < 3:
+            continue                       # blank reply: logged in Notion, no ping
+        notify.action(f"{name} replied, answer them", f"{summary}\n{note}", tags="speech_balloon")
     box.logout()
 
     if auto or held or meetings or bounced or unsub or nudged:

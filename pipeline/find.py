@@ -206,7 +206,7 @@ def run(limit=None):
         notes += " Stopped at the time/check limit."
     notion.log_run(f"Directories find {dt.date.today()}", "Directories find", total_need, found, result, notes)
     per = ", ".join(f"{r.name.upper()} {r.c['email'] + r.c['whatsapp']}/{r.need}" for r in regions)
-    notify.push("Directories: leads found", f"{found}/{total_need} leads queued, {wa} of them WhatsApp ({per}). "
+    notify.fyi("Directories: leads found", f"{found}/{total_need} leads queued, {wa} of them WhatsApp ({per}). "
                 f"{checked} businesses checked in {mins} min.", tags="mag")
     if total_need and checked == 0:
         raise RuntimeError("No businesses could be checked. " + notes)
@@ -225,7 +225,7 @@ def main():
                 notion.log_run(f"Directories find {dt.date.today()}", "Directories find", 0, 0,
                                "Failed", f"Error: {config.redact(e)[:500]}")
             finally:
-                notify.push("Directories find FAILED", config.redact(e)[:300], priority="high", tags="warning")
+                notify.fyi("⚠️ Lead search crashed (Claude will check)", "Nothing for you to do. " + config.redact(e)[:250], tags="warning")
         raise
 
 

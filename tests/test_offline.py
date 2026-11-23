@@ -254,3 +254,12 @@ def test_auto_reply_detected():
     assert replies.is_auto_reply(m, "I am out of the office with no access to email; returning Tuesday.")
     m2 = EmailMessage(); m2["Subject"] = "Re: project videos"
     assert not replies.is_auto_reply(m2, "Sounds interesting, can you send the audit?")
+
+
+def test_ping_levels(monkeypatch):
+    from pipeline import notify
+    sent = []
+    monkeypatch.setattr(notify, "push", lambda t, m, priority="default", tags="": sent.append((t, priority)))
+    notify.action("Zoom booked with X", "m"); notify.fyi("UK done 25/25", "m")
+    assert sent[0] == ("🔴 ACTION: Zoom booked with X", "urgent")
+    assert sent[1] == ("UK done 25/25", "low")
