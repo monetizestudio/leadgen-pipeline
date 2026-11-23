@@ -245,3 +245,12 @@ def test_reply_matching():
     assert replies.match_lead(leads, "john@acme-interiors.co.uk", "x") == "info@acme-interiors.co.uk"
     assert replies.match_lead(leads, "john.smith@gmail.com", "RE: Re: Quick idea for Acme Interiors") == "info@acme-interiors.co.uk"
     assert replies.match_lead(leads, "someone@gmail.com", "hello") is None
+
+
+def test_auto_reply_detected():
+    from email.message import EmailMessage
+    from pipeline import replies
+    m = EmailMessage(); m["Subject"] = "Re: project videos"
+    assert replies.is_auto_reply(m, "I am out of the office with no access to email; returning Tuesday.")
+    m2 = EmailMessage(); m2["Subject"] = "Re: project videos"
+    assert not replies.is_auto_reply(m2, "Sounds interesting, can you send the audit?")

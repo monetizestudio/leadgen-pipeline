@@ -111,7 +111,19 @@ def classify(ours, theirs):
         return json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
     except Exception as e:
         print(f"[replies] AI could not read reply: {config.redact(e)[:150]}")
-        return {"intent": "other", "summary": theirs[:150], "draft": ""}
+        return {"intent": "retry", "summary": theirs[:150], "draft": ""}
+
+
+OOO_RE = re.compile(r"out of (the )?office|on (annual )?leave|automatic reply|auto[- ]?reply|away from (the )?office"
+                    r"|limited access to (my )?email|no access to email", re.I)
+
+
+def is_auto_reply(msg, body):
+    """Out-of-office / autoresponder, detected without AI so it never gets held for Azeem."""
+    auto = (msg.get("Auto-Submitted", "no") or "no").lower()
+    if auto != "no" or msg.get("X-Autoreply") or msg.get("X-Autorespond"):
+        return True
+    return bool(OOO_RE.search(msg.get("Subject", "") or "") or OOO_RE.search((body or "")[:600]))
 
 
 def save_draft(box, to, subject, body, in_reply_to):
@@ -231,8 +243,12 @@ def run():
         if not page or notion.read(page, "Status") != "Contacted":
             continue                       # only first replies here; later back-and-forth is Azeem's
         name = notion.read(page, "Business")
+        if is_auto_reply(msg, body):
+            continue                       # out of office: keep following up later
         res = classify(notion.read(page, "Message") or "", body)
         intent = res.get("intent", "other")
+        if intent == "retry":
+            continue                       # AI down: leave it, the next run (2 h) reads it again
         if intent == "out_of_office":
             continue                       # keep following up later
         leads.pop(key, None)
