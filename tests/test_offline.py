@@ -47,8 +47,8 @@ def test_qualify_rules():
 
 
 def test_build_props_prefers_whatsapp():
-    lead = {"name": "Arc", "website": "https://arc.com", "niche": "Architecture", "city": "Dubai",
-            "country": "UAE"}
+    lead = {"name": "Arc", "website": "https://arc.com", "niche": "Architecture", "city": "London",
+            "country": "UK"}
     res = {"fit_score": 8, "fit_notes": "n", "first_name": "Omar", "observation": "Saw the villa."}
     props, ch = find.build_props(lead, res, {"emails": ["a@arc.com"], "whatsapp": ["971500000000"]})
     assert ch == "WhatsApp" and props["WhatsApp"]["phone_number"] == "+971500000000"
@@ -224,3 +224,12 @@ def test_send_plan_counts_today_and_tops_up(monkeypatch):
     assert before == 10 and owed == 15          # only the rest of today's 25
     assert len(fu) == 1                         # only the day-3 follow-up is due
     assert send.notion.read(q[0], "Country") == "US"   # US before Canada
+
+
+def test_uae_prefers_email():
+    lead = {"name": "Arc", "website": "https://arc.ae", "niche": "Architecture", "city": "Dubai", "country": "UAE"}
+    res = {"fit_score": 8, "fit_notes": "n", "first_name": "Omar", "observation": "Saw the villa."}
+    props, ch = find.build_props(lead, res, {"emails": ["a@arc.ae"], "whatsapp": ["971500000000"]})
+    assert ch == "Email" and props["WhatsApp"]["phone_number"] == "+971500000000"
+    props, ch = find.build_props(lead, res, {"emails": [], "whatsapp": ["971500000000"]})
+    assert ch == "WhatsApp"

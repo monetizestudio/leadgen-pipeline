@@ -8,6 +8,7 @@ Usage:  python -m pipeline.find            (full run)
 """
 import argparse
 import datetime as dt
+import re
 import time
 import traceback
 
@@ -35,8 +36,11 @@ def queued_email(region):
 
 
 def build_props(lead, res, contacts):
-    channel = "WhatsApp" if contacts["whatsapp"] else "Email"
     email = contacts["emails"][0] if contacts["emails"] else ""
+    if config.region_of(lead["country"]) in config.EMAIL_FIRST_REGIONS and email:
+        channel = "Email"
+    else:
+        channel = "WhatsApp" if contacts["whatsapp"] else "Email"
     f = messages.fields(lead["name"], res.get("first_name"), lead["niche"], lead["city"], res["observation"])
     subject, body = messages.first_email(f, lead["niche"])
     msg = messages.whatsapp(f) if channel == "WhatsApp" else body
@@ -153,8 +157,35 @@ def check_one(reg, country, city, biz, seen):
     print(f"[{reg.name} {c['email']}/{reg.need}] {lead['name']} ({city}) via {channel}")
 
 
+def switch_to_email():
+    """Queued WhatsApp leads in email-first regions that have an email: turn them into email leads."""
+    moved = 0
+    for region in config.EMAIL_FIRST_REGIONS:
+        pages = notion.query(config.LEADS_DB, {"and": [
+            {"or": [{"property": "Country", "select": {"equals": c}} for c in config.REGIONS[region]]},
+            {"property": "Status", "select": {"equals": "Queued"}},
+            {"property": "Channel", "select": {"equals": "WhatsApp"}}]})
+        for p in pages:
+            if not p["properties"]["Email"]["email"]:
+                continue
+            company = notion.read(p, "Business")
+            wa = notion.read(p, "Message") or ""
+            m = re.search(re.escape(f"Came across {company}.") + r"\s*(.*?)\s*We make ", wa, re.S)
+            f = messages.fields(company, notion.read(p, "First name"), notion.read(p, "Niche"),
+                                notion.read(p, "City"), m.group(1) if m else "")
+            subject, body = messages.first_email(f, notion.read(p, "Niche"))
+            body = body.replace("\n\n\n\n", "\n\n")      # no observation found: drop the empty line
+            notion.update_page(p["id"], {"Channel": notion.select("Email"), "Subject": notion.text(subject),
+                                         "Message": notion.text(body)})
+            moved += 1
+    if moved:
+        print(f"switched {moved} WhatsApp leads to email")
+    return moved
+
+
 def run(limit=None):
     started = time.time()
+    switch_to_email()
     target = config.QUEUE_DAYS
     regions = []
     for name, per_day in config.REGION_DAILY_NEW.items():

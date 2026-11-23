@@ -70,6 +70,7 @@ REGIONS = {
 SEARCH_COUNTRIES = {"australia": ["Australia"], "uae": ["UAE"], "uk": ["UK"], "na": ["US"]}
 REGION_TZ = {"australia": "Australia/Sydney", "uae": "Asia/Dubai", "uk": "Europe/London",
              "na": "America/New_York"}
+EMAIL_FIRST_REGIONS = {"uae"}   # use email whenever a site has one (most UAE sites also list WhatsApp)
 WIDE_RADIUS_M = 40000         # second pass for a region whose cities ran dry
 
 # ---------- Niches: OpenStreetMap tags -> Notion niche ----------
