@@ -87,6 +87,11 @@ def run(region, max_new=None):
     if not followups and owed == 0:
         print(f"{region}: {sent_before} new emails already sent today and no follow-ups due. Nothing to do.")
         return
+    goal = config.REGION_DAILY_NEW[region]
+    notify.push(f"🚀 {region.upper()} outreach started",
+                f"Sending {min(owed, len(queued))} first emails ({sent_before}/{goal} already out today) "
+                f"and {len(followups)} follow-ups. About {(min(owed, len(queued)) + len(followups)) * 3 // 2} min.",
+                tags="rocket")
 
     sent_new, sent_fu, skipped, errors = 0, 0, 0, []
     paused = ""
@@ -148,7 +153,6 @@ def run(region, max_new=None):
         {"property": "Channel", "select": {"equals": "WhatsApp"}},
         {"property": "Status", "select": {"equals": "Queued"}}]}))
     total_new = sent_before + sent_new
-    goal = config.REGION_DAILY_NEW[region]
     short = total_new < goal and max_new is None
     result = "Failed" if paused else ("Partial" if short or errors else "Done")
     notes = (f"{region.upper()}: {sent_new} first emails this run ({total_new}/{goal} today), "
