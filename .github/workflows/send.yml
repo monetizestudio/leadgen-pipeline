@@ -2,10 +2,17 @@ name: Send emails
 
 on:
   schedule:
-    - cron: "30 22 * * *"   # Australia: 3:30 AM Karachi
-    - cron: "30 5 * * *"    # UAE: 10:30 AM Karachi
-    - cron: "30 8 * * *"    # UK: 1:30 PM Karachi
-    - cron: "30 14 * * *"   # US/Canada: 7:30 PM Karachi
+    # Off the busy :00/:30 marks (GitHub delays those most). Each region has a second "catch-up"
+    # run 3 hours later: it only sends what the first run didn't (counted from Notion), so if
+    # GitHub drops or delays a run, the region still gets its 25 that day.
+    - cron: "17 22 * * *"   # Australia: 3:17 AM Karachi (9:17 AM Sydney)
+    - cron: "17 1 * * *"    # Australia catch-up
+    - cron: "17 5 * * *"    # UAE: 10:17 AM Karachi (9:17 AM Dubai)
+    - cron: "17 8 * * *"    # UAE catch-up
+    - cron: "47 8 * * *"    # UK: 1:47 PM Karachi (8:47 AM London)
+    - cron: "47 11 * * *"   # UK catch-up
+    - cron: "17 14 * * *"   # US: 7:17 PM Karachi (9:17 AM New York)
+    - cron: "17 17 * * *"   # US catch-up
   workflow_dispatch:
     inputs:
       region:
@@ -14,18 +21,38 @@ on:
         type: choice
         options: [australia, uae, uk, na]
       max:
-        description: "Max emails this run (blank = today's warm-up cap; use 2 for a test)"
+        description: "Max new emails this run (blank = whatever is still owed of today's 25; use 2 for a test)"
         required: false
         default: ""
 
-concurrency:
-  group: send-emails
-  cancel-in-progress: false
-
 jobs:
+  pick:
+    runs-on: ubuntu-latest
+    outputs:
+      region: ${{ steps.r.outputs.region }}
+    steps:
+      - id: r
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_REGION: ${{ github.event.inputs.region }}
+        run: |
+          case "$SCHEDULE" in
+            "17 22 * * *"|"17 1 * * *")  REGION=australia ;;
+            "17 5 * * *"|"17 8 * * *")   REGION=uae ;;
+            "47 8 * * *"|"47 11 * * *")  REGION=uk ;;
+            "17 14 * * *"|"17 17 * * *") REGION=na ;;
+            *)                           REGION="$INPUT_REGION" ;;
+          esac
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+
   send:
+    needs: pick
     runs-on: ubuntu-latest
     timeout-minutes: 240
+    # one run per region at a time, so a catch-up run waits for the main run and never double-sends
+    concurrency:
+      group: send-${{ needs.pick.outputs.region }}
+      cancel-in-progress: false
     env:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -42,17 +69,9 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Send
         env:
-          SCHEDULE: ${{ github.event.schedule }}
-          INPUT_REGION: ${{ github.event.inputs.region }}
+          REGION: ${{ needs.pick.outputs.region }}
           INPUT_MAX: ${{ github.event.inputs.max }}
         run: |
-          case "$SCHEDULE" in
-            "30 22 * * *") REGION=australia ;;
-            "30 5 * * *")  REGION=uae ;;
-            "30 8 * * *")  REGION=uk ;;
-            "30 14 * * *") REGION=na ;;
-            *)             REGION="$INPUT_REGION" ;;
-          esac
           ARGS="--region $REGION"
           if [ -n "$INPUT_MAX" ]; then ARGS="$ARGS --max $INPUT_MAX"; fi
           echo "Running: python -m pipeline.send $ARGS"

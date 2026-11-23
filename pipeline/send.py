@@ -1,4 +1,6 @@
-"""Regional send run: emails queued leads at that region's morning, plus day-3 and day-7 follow-ups.
+"""Regional send run: 25 first emails a day per region (Australia, UAE, UK, US), plus day-3 and
+day-7 follow-ups on top. Safe to run more than once a day: it counts what already went out today
+(in that region's time zone) and only sends what's still owed, so a late or retried run fills the gap.
 
 Usage:  python -m pipeline.send --region uae        (regions: australia, uae, uk, na)
         python -m pipeline.send --region uk --max 2  (test: send at most 2 new emails)
@@ -13,7 +15,7 @@ import traceback
 from email.message import EmailMessage
 from email.utils import make_msgid
 
-from . import config, messages, notion, notify
+from . import config, messages, notion, notify, scrape
 
 
 def _countries_filter(countries):
@@ -30,12 +32,12 @@ def _send(smtp, to, subject, body):
     smtp.send_message(msg)
 
 
-def _due(page, touch):
+def _due(page, touch, today):
     last = notion.read(page, "Last touch")
     if not last:
         return False
     gap = config.FOLLOWUP_GAP_DAYS[touch]
-    return dt.date.fromisoformat(last[:10]) <= dt.date.today() - dt.timedelta(days=gap)
+    return dt.date.fromisoformat(last[:10]) <= today - dt.timedelta(days=gap)
 
 
 def _fields(page):
@@ -47,110 +49,132 @@ GMAIL_LIMIT_SIGNS = ("421", "4.7.0", "5.4.5", "sending limit", "quota", "rate li
                      "temporarily", "suspended")
 
 
-class GmailPaused(Exception):
-    pass
-
-
-def run(region, max_total):
+def plan(region, today, max_new=None):
+    """What this run should send: (follow-ups, new leads, new already sent today, new still owed).
+    Counting what already went out today (region time) makes repeat/late runs safe."""
     countries = config.REGIONS[region]
-    base = {"and": [_countries_filter(countries), {"property": "Channel", "select": {"equals": "Email"}}]}
-    queued = notion.query(config.LEADS_DB, {"and": base["and"] + [
+    base = [_countries_filter(countries), {"property": "Channel", "select": {"equals": "Email"}}]
+    sent_today = len(notion.query(config.LEADS_DB, {"and": [
+        _countries_filter(countries),
+        {"property": "Date contacted", "date": {"equals": today.isoformat()}}]}))
+    owed = max(0, config.REGION_DAILY_NEW[region] - sent_today)
+    if max_new is not None:
+        owed = min(owed, max_new)
+    queued = notion.query(config.LEADS_DB, {"and": base + [
         {"property": "Status", "select": {"equals": "Queued"}}]})
-    queued.sort(key=lambda p: notion.read(p, "Date found") or "")   # oldest leads first
-    contacted = notion.query(config.LEADS_DB, {"and": base["and"] + [
+    # search countries first (US before Canada), then oldest leads first
+    first = config.SEARCH_COUNTRIES[region]
+    queued.sort(key=lambda p: (0 if notion.read(p, "Country") in first else 1, notion.read(p, "Date found") or ""))
+    contacted = notion.query(config.LEADS_DB, {"and": base + [
         {"property": "Status", "select": {"equals": "Contacted"}}]})
     followups = []
     for p in contacted:
         touches = int(p["properties"]["Touches"]["number"] or 0)
-        if touches in (1, 2) and _due(p, touches + 1):
+        if touches in (1, 2) and _due(p, touches + 1, today):
             followups.append((p, touches + 1))
+    return followups[:config.MAX_FOLLOWUPS_PER_RUN], queued, sent_today, owed
 
-    # one budget for this run: follow-ups first (warmer), then new leads
-    followups = followups[:max_total]
-    queued = queued[:max(0, max_total - len(followups))]
 
-    sent_new, sent_fu, errors = 0, 0, []
+def _address(page):
+    raw = page["properties"]["Email"]["email"] or ""
+    clean = scrape.clean_emails([raw])
+    return clean[0] if clean else ""
+
+
+def run(region, max_new=None):
+    today = config.region_today(region)
+    followups, queued, sent_before, owed = plan(region, today, max_new)
+    if not followups and owed == 0:
+        print(f"{region}: {sent_before} new emails already sent today and no follow-ups due. Nothing to do.")
+        return
+
+    sent_new, sent_fu, skipped, errors = 0, 0, 0, []
     paused = ""
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
         smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
 
-        def check_limit(err):
+        def limit_hit(err):
             text = str(err).lower()
-            if any(sign in text for sign in GMAIL_LIMIT_SIGNS):
-                raise GmailPaused(config.redact(err)[:200])
+            return config.redact(err)[:200] if any(sign in text for sign in GMAIL_LIMIT_SIGNS) else ""
 
         for page, touch in followups:
-            to = page["properties"]["Email"]["email"]
+            to = _address(page)
+            if not to:
+                continue
             try:
                 _send(smtp, to, "Re: " + notion.read(page, "Subject"),
                       messages.followup_email(_fields(page), touch))
-                notion.update_page(page["id"], {"Touches": {"number": touch}, "Last touch": notion.date()})
+                notion.update_page(page["id"], {"Touches": {"number": touch}, "Last touch": notion.date(today)})
                 sent_fu += 1
-            except GmailPaused:
-                raise
             except Exception as e:  # keep going, one bad address shouldn't stop the run
                 errors.append(f"{to}: {config.redact(e)[:100]}")
-                try:
-                    check_limit(e)
-                except GmailPaused as gp:
-                    paused = str(gp)
+                paused = limit_hit(e)
+                if paused:
                     break
             time.sleep(random.randint(*config.SEND_DELAY_SEC))
 
         for page in ([] if paused else queued):
-            to = page["properties"]["Email"]["email"]
+            if sent_new >= owed:
+                break
+            to = _address(page)
             if not to:
+                notion.update_page(page["id"], {"Status": notion.select("Bounced"),
+                                                "Reply": notion.text("Not a usable email address")})
+                skipped += 1
                 continue
             try:
                 _send(smtp, to, notion.read(page, "Subject"), notion.read(page, "Message"))
                 notion.update_page(page["id"], {
+                    "Email": {"email": to},
                     "Status": notion.select("Contacted"),
                     "Touches": {"number": 1},
-                    "Date contacted": notion.date(),
-                    "Last touch": notion.date(),
+                    "Date contacted": notion.date(today),
+                    "Last touch": notion.date(today),
                 })
                 sent_new += 1
-                print(f"sent {sent_new}: {to}")
+                print(f"sent {sent_new}/{owed}: {to}")
             except smtplib.SMTPRecipientsRefused:
                 notion.update_page(page["id"], {"Status": notion.select("Bounced")})
+                skipped += 1
             except Exception as e:
                 errors.append(f"{to}: {config.redact(e)[:100]}")
-                try:
-                    check_limit(e)
-                except GmailPaused as gp:
-                    paused = str(gp)
+                paused = limit_hit(e)
+                if paused:
                     break
             time.sleep(random.randint(*config.SEND_DELAY_SEC))
 
     wa_waiting = len(notion.query(config.LEADS_DB, {"and": [
-        _countries_filter(countries),
+        _countries_filter(config.REGIONS[region]),
         {"property": "Channel", "select": {"equals": "WhatsApp"}},
         {"property": "Status", "select": {"equals": "Queued"}}]}))
-    target = len(queued) + len(followups)
-    done = sent_new + sent_fu
-    result = "Done" if not errors else ("Partial" if done else "Failed")
-    notes = (f"{region.upper()}: {sent_new} first emails, {sent_fu} follow-ups "
-             f"(run cap {max_total}, today's cap {config.daily_email_cap()}). "
-             f"{wa_waiting} WhatsApp leads waiting for bulk sender. Errors: {len(errors)}")
+    total_new = sent_before + sent_new
+    goal = config.REGION_DAILY_NEW[region]
+    short = total_new < goal and max_new is None
+    result = "Failed" if paused else ("Partial" if short or errors else "Done")
+    notes = (f"{region.upper()}: {sent_new} first emails this run ({total_new}/{goal} today), "
+             f"{sent_fu} follow-ups. {wa_waiting} WhatsApp leads waiting for bulk sender. "
+             f"Bad addresses skipped: {skipped}. Errors: {len(errors)}")
+    if short and not paused:
+        notes += f". SHORT: ran out of queued {region.upper()} email leads."
     if errors:
         notes += " | " + "; ".join(errors[:3])
     if paused:
-        result = "Failed"
         notes = f"GMAIL PAUSED SENDING, stopped to protect the account: {paused}. " + notes
-    notion.log_run(f"Send {region} {dt.date.today()}", "Directories send", target, done, result, notes)
+    notion.log_run(f"Send {region} {today}", "Directories send", goal, total_new, result, notes)
     if paused:
         notify.push("⛔ Gmail limit hit, sending paused", notes, priority="urgent", tags="no_entry")
     else:
-        notify.push(f"Emails sent: {region.upper()}", notes, tags="email")
+        flag = "⚠️ " if short else "✉️ "
+        notify.push(f"{flag}Emails sent: {region.upper()} {total_new}/{goal}", notes, tags="email")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--region", required=True, choices=list(config.REGIONS))
-    ap.add_argument("--max", type=int, default=None, help="emails this run (default: today's warm-up cap / 4)")
+    ap.add_argument("--max", type=int, default=None, help="test: at most this many new emails this run")
     args = ap.parse_args()
     try:
-        run(args.region, args.max if args.max is not None else config.per_run_cap())
+        run(args.region, args.max)
     except Exception as e:
         traceback.print_exc()
         notify.push(f"Send {args.region} FAILED", config.redact(e)[:300], priority="high", tags="warning")

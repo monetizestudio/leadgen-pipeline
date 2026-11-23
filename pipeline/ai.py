@@ -33,7 +33,8 @@ Website text (may be messy):
 Reply with JSON only, these keys:
 - "english": true if the business communicates in English
 - "in_niche": true if it really is a {niche} business (architecture, interiors, kitchens, bathrooms, tiles,
-  remodeling, or real estate)
+  remodeling, or real estate). FALSE for solicitors/lawyers, plumbers, electricians, heating engineers,
+  damage restoration, cleaners, removals, property factors/block management, web or marketing agencies
 - "size": "small", "medium" or "large" by the definition above
 - "medium_sized": true only if size is "medium"
 - "fit_score": integer 1-10, how good a client this would be for Meta ads + video content
@@ -143,6 +144,10 @@ def qualify(lead, site_text):
         data = _call(prompt)
         raw = data["candidates"][0]["content"]["parts"][0]["text"]
         res = json.loads(raw)
+        if isinstance(res, list):          # Gemini sometimes wraps the answer in a list
+            res = next((x for x in res if isinstance(x, dict)), None)
+        if not isinstance(res, dict):
+            raise TypeError(f"unexpected AI answer: {raw[:80]}")
         _fails = 0
         return res
     except (requests.RequestException, KeyError, IndexError, TypeError, json.JSONDecodeError) as e:
@@ -157,7 +162,7 @@ def qualify(lead, site_text):
 
 def verdict(res):
     """(result label for the audit log, reason) for an AI answer."""
-    if not res:
+    if not isinstance(res, dict) or not res:
         return "AI error", "Gemini could not check this one"
     notes = res.get("fit_notes", "")
     if not res.get("english"):
@@ -172,5 +177,5 @@ def verdict(res):
 
 
 def is_qualified(res):
-    return bool(res and res.get("english") and res.get("in_niche") and res.get("medium_sized")
+    return bool(isinstance(res, dict) and res.get("english") and res.get("in_niche") and res.get("medium_sized")
                 and int(res.get("fit_score", 0) or 0) >= config.MIN_FIT_SCORE and res.get("observation"))

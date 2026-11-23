@@ -1,7 +1,7 @@
 """Find businesses on OpenStreetMap and pull contact details from their websites."""
 import re
 import time
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -13,7 +13,11 @@ UA = {"User-Agent": "MonetizeStudioLeadFinder/1.0 (contact: monetizestudio.githu
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 WA_RE = re.compile(r"(?:wa\.me/|api\.whatsapp\.com/send\?phone=|whatsapp\.com/send\?phone=)\+?(\d{8,15})")
 JUNK_EMAIL = ("example.", "sentry", "wixpress", "domain.com", "email.com", "yourname", "@2x", ".png",
-              ".jpg", ".jpeg", ".gif", ".svg", ".webp", "noreply", "no-reply", "godaddy", "schema.org")
+              ".jpg", ".jpeg", ".gif", ".svg", ".webp", "noreply", "no-reply", "godaddy", "schema.org",
+              # website theme / builder / agency addresses found in site footers
+              "-themes.", "themeforest", "themeisle", "themerex", "envato", "wordpress", "wpengine", "squarespace", "wix.com", "weebly", "shopify",
+              "qodeinteractive", "webflow", "hubspot", "mailchimp", "sentry.io", "cloudflare")
+EMAIL_OK = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9-]+(\.[a-z0-9-]+)*\.[a-z]{2,}$")
 CONTACT_PATHS = ["", "/contact", "/contact-us", "/about", "/about-us"]
 
 
@@ -32,8 +36,9 @@ def clean_emails(found, site=""):
     host = urlparse(site).netloc.removeprefix("www.") if site else ""
     out = []
     for e in found:
-        e = e.strip(".").lower()
-        if any(j in e for j in JUNK_EMAIL):
+        e = unquote(str(e)).strip().strip(".").lower()
+        e = re.sub(r"^(mailto:|email:|e-mail:|e:)\s*", "", e)
+        if not EMAIL_OK.match(e) or any(j in e for j in JUNK_EMAIL):
             continue
         if e not in out:
             out.append(e)

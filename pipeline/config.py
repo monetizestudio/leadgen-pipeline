@@ -27,22 +27,24 @@ RUNS_DB = "41e3ff41f39f8162bed5f2011e55ae06"
 CHECKED_DB = "41e3ff41f39f814ea83dc87b7123cc2f"   # audit log: every business checked
 
 # ---------- Targets ----------
-DAILY_TARGET = 100            # qualified leads with contact details per night
-MAX_CANDIDATES = 600          # stop checking after this many businesses
+# Azeem's target (23 Nov 2026): 100 first emails SENT every day, 25 per region.
+# The finder qualifies as many businesses as it takes to keep every region stocked.
+REGION_DAILY_NEW = {"australia": 25, "uae": 25, "uk": 25, "na": 25}
+DAILY_TARGET = sum(REGION_DAILY_NEW.values())   # 100 first emails a day
+QUEUE_DAYS = 2                # finder keeps this many days of email leads queued per region
+MAX_CANDIDATES = 1500         # stop checking after this many businesses in one night
 MIN_FIT_SCORE = 6             # 1-10, AI fit score needed to qualify
-FIND_TIME_LIMIT_MIN = 150     # stop the find run after this many minutes
-DAILY_EMAIL_CAP = 300         # all emails per day (first emails + follow-ups), after warm-up
-WARMUP_START = "2026-11-21"   # first sending day
-WARMUP_DAYS = 28              # ramps from WARMUP_FIRST_DAY up to DAILY_EMAIL_CAP over this many days (0 = off)
-WARMUP_FIRST_DAY = 30
+FIND_TIME_LIMIT_MIN = 270     # stop the find run after this many minutes (job timeout is 300)
+CITY_CHUNK = 60               # businesses checked in one city before giving the next region a turn
+DAILY_EMAIL_CAP = 300         # safety ceiling: all emails per day incl. follow-ups
+MAX_FOLLOWUPS_PER_RUN = 50    # follow-ups are sent on top of the 25 new emails
 SEND_DELAY_SEC = (60, 120)    # random pause between emails: 1-2 minutes
-SEND_RUNS_PER_DAY = 4         # Australia, UAE, UK, US/Canada share the daily cap
-MAX_QUEUE_DAYS = 3            # finder skips a night if unsent email leads > this many days of sending
 GEMINI_DELAY_SEC = 7          # pause between AI calls (free tier rate limit)
 
 # ---------- Countries and cities (rotated each night) ----------
 CITIES = {  # city -> (latitude, longitude) of the centre; search radius below
-    "UAE": {"Dubai": (25.2048, 55.2708), "Abu Dhabi": (24.4539, 54.3773), "Sharjah": (25.3463, 55.4209)},
+    "UAE": {"Dubai": (25.2048, 55.2708), "Abu Dhabi": (24.4539, 54.3773), "Sharjah": (25.3463, 55.4209),
+            "Ajman": (25.4052, 55.5136), "Ras Al Khaimah": (25.8007, 55.9762), "Al Ain": (24.2075, 55.7447)},
     "UK": {"London": (51.5074, -0.1278), "Manchester": (53.4808, -2.2426), "Birmingham": (52.4862, -1.8904),
            "Leeds": (53.8008, -1.5491), "Bristol": (51.4545, -2.5879), "Glasgow": (55.8642, -4.2518),
            "Liverpool": (53.4084, -2.9916), "Edinburgh": (55.9533, -3.1883)},
@@ -57,15 +59,18 @@ CITIES = {  # city -> (latitude, longitude) of the centre; search radius below
                   "Perth": (-31.9505, 115.8605), "Adelaide": (-34.9285, 138.6007), "Gold Coast": (-28.0167, 153.4000)},
 }
 SEARCH_RADIUS_M = 20000
-CITIES_PER_NIGHT = 6
 
 # Regional send runs -> which countries they email (each fires at that region's morning)
 REGIONS = {
     "australia": ["Australia"],
     "uae": ["UAE"],
     "uk": ["UK"],
-    "na": ["US", "Canada"],
+    "na": ["US", "Canada"],      # US is searched; Canada leads already queued still get sent
 }
+SEARCH_COUNTRIES = {"australia": ["Australia"], "uae": ["UAE"], "uk": ["UK"], "na": ["US"]}
+REGION_TZ = {"australia": "Australia/Sydney", "uae": "Asia/Dubai", "uk": "Europe/London",
+             "na": "America/New_York"}
+WIDE_RADIUS_M = 40000         # second pass for a region whose cities ran dry
 
 # ---------- Niches: OpenStreetMap tags -> Notion niche ----------
 OSM_TAGS = [
@@ -129,18 +134,12 @@ WHATSAPP_1 = ("Hi {first_name}, Azeem here from Monetize Studio. Came across {co
 FOLLOWUP_GAP_DAYS = {2: 3, 3: 4}   # touch number -> days after previous touch
 
 
-def daily_email_cap(today=None):
+def region_today(region):
+    """Today's date in that region's own time zone, so late or repeated runs count the same day."""
     import datetime as _dt
-    today = today or _dt.date.today()
-    if WARMUP_DAYS <= 0:
-        return DAILY_EMAIL_CAP
-    day = (today - _dt.date.fromisoformat(WARMUP_START)).days
-    if day < 0:
-        return WARMUP_FIRST_DAY
-    if day >= WARMUP_DAYS:
-        return DAILY_EMAIL_CAP
-    return int(WARMUP_FIRST_DAY + (DAILY_EMAIL_CAP - WARMUP_FIRST_DAY) * day / WARMUP_DAYS)
+    from zoneinfo import ZoneInfo
+    return _dt.datetime.now(ZoneInfo(REGION_TZ[region])).date()
 
 
-def per_run_cap(today=None):
-    return -(-daily_email_cap(today) // SEND_RUNS_PER_DAY)   # round up
+def region_of(country):
+    return next((r for r, cs in REGIONS.items() if country in cs), None)

@@ -58,10 +58,22 @@ def test_build_props_prefers_whatsapp():
 
 def test_city_rotation_covers_all():
     cities = find.tonight_cities()
-    assert len(cities) == sum(len(v) for v in config.CITIES.values())
+    want = sum(len(config.CITIES[c]) for cs in config.SEARCH_COUNTRIES.values() for c in cs)
+    assert len(cities) == want
     assert len({c[1] for c in cities}) == len(cities)
     for country, city, (lat, lon) in cities:
         assert -90 < lat < 90 and -180 < lon < 180
+    assert {c[0] for c in find.region_cities("na")} == {"US"}
+    assert {c[0] for c in find.region_cities("uae")} == {"UAE"}
+
+
+def test_targets_are_100_a_day_25_per_region():
+    assert config.REGION_DAILY_NEW == {"australia": 25, "uae": 25, "uk": 25, "na": 25}
+    assert config.DAILY_TARGET == 100
+    assert set(config.REGION_TZ) == set(config.REGIONS) == set(config.SEARCH_COUNTRIES)
+    assert config.region_of("Canada") == "na" and config.region_of("UK") == "uk"
+    for r in config.REGIONS:
+        assert config.region_today(r)
 
 
 def test_redact_hides_keys():
@@ -144,11 +156,71 @@ def test_call_falls_back_on_timeout_and_503(monkeypatch):
     ai._candidates[:] = []
 
 
-def test_warmup_ramp():
+def test_ai_list_answer_does_not_crash():
+    good = {"english": True, "in_niche": True, "medium_sized": True, "fit_score": 7, "observation": "x"}
+    assert ai.verdict([good])[0] == "AI error"      # verdict never crashes on odd shapes
+    assert not ai.is_qualified([good])
+
+
+def test_qualify_unwraps_list(monkeypatch):
+    import json
+    good = {"english": True, "in_niche": True, "medium_sized": True, "size": "medium",
+            "fit_score": 7, "observation": "x", "fit_notes": ""}
+    monkeypatch.setattr(ai, "_call", lambda p: {"candidates": [{"content": {"parts": [{"text": json.dumps([good])}]}}]})
+    monkeypatch.setattr(ai.time, "sleep", lambda s: None)
+    lead = {"niche": "Architecture", "city": "Dubai", "country": "UAE", "name": "A", "website": "https://a.ae"}
+    assert ai.verdict(ai.qualify(lead, "text"))[0] == "Qualified"
+
+
+def test_notify_emoji_title_is_json_safe(monkeypatch):
+    from pipeline import notify
+    sent = {}
+
+    class R:
+        status_code = 200
+        text = ""
+
+    def fake_post(url, json=None, **kw):
+        sent.update(json)
+        return R()
+
+    monkeypatch.setattr(notify.requests, "post", fake_post)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "t")
+    notify.push("📅 Zoom booked: Arc", "body", priority="urgent", tags="calendar")
+    assert sent["title"].startswith("📅") and sent["priority"] == 5 and sent["tags"] == ["calendar"]
+    monkeypatch.setattr(notify.requests, "post", lambda *a, **k: (_ for _ in ()).throw(UnicodeEncodeError("latin-1", "x", 0, 1, "bad")))
+    notify.push("⚠️ x", "y")   # must not raise
+
+
+def test_clean_emails_drops_junk_and_prefixes():
+    got = scrape.clean_emails(["email:info@easyletproperty.com", "support@elated-themes.com",
+                               "Mailto:Sales@Arc.co.uk", "a@b"], "https://arc.co.uk")
+    assert got == ["sales@arc.co.uk", "info@easyletproperty.com"]
+
+
+def test_send_plan_counts_today_and_tops_up(monkeypatch):
     import datetime as d
-    start = d.date.fromisoformat(config.WARMUP_START)
-    assert config.daily_email_cap(start) == config.WARMUP_FIRST_DAY
-    mid = config.daily_email_cap(start + d.timedelta(days=14))
-    assert config.WARMUP_FIRST_DAY < mid < config.DAILY_EMAIL_CAP
-    assert config.daily_email_cap(start + d.timedelta(days=40)) == config.DAILY_EMAIL_CAP
-    assert config.per_run_cap(start + d.timedelta(days=40)) == 75
+    from pipeline import send
+    today = d.date(2026, 11, 23)
+
+    def page(country, status, touches=0, last=None, found="2026-11-20"):
+        return {"id": "x", "properties": {
+            "Country": {"type": "select", "select": {"name": country}},
+            "Date found": {"type": "date", "date": {"start": found}},
+            "Last touch": {"type": "date", "date": {"start": last} if last else None},
+            "Touches": {"type": "number", "number": touches}}}
+
+    queued = [page("Canada", "Queued", found="2026-11-01")] + [page("US", "Queued") for _ in range(40)]
+    contacted = [page("US", "Contacted", 1, "2026-11-20"), page("US", "Contacted", 1, "2026-11-22")]
+
+    def fake_query(db, f):
+        text = str(f)
+        if "Date contacted" in text:
+            return [1] * 10                     # 10 already sent today by an earlier run
+        return queued if "Queued" in text else contacted
+
+    monkeypatch.setattr(send.notion, "query", fake_query)
+    fu, q, before, owed = send.plan("na", today)
+    assert before == 10 and owed == 15          # only the rest of today's 25
+    assert len(fu) == 1                         # only the day-3 follow-up is due
+    assert send.notion.read(q[0], "Country") == "US"   # US before Canada

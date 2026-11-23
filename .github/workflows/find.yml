@@ -2,13 +2,13 @@ name: Find leads (nightly)
 
 on:
   schedule:
-    - cron: "0 18 * * *"   # 11:00 PM Karachi (18:00 UTC)
+    - cron: "23 16 * * *"   # 9:23 PM Karachi (off the busy :00 mark; GitHub often starts it late)
   workflow_dispatch:
     inputs:
       limit:
-        description: "Stop after this many qualified leads (use 5 for a test)"
+        description: "Test only: stop after about this many leads (blank = full run, 25/day x 2 days per region)"
         required: false
-        default: "100"
+        default: ""
 
 concurrency:
   group: find-leads
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   find:
     runs-on: ubuntu-latest
-    timeout-minutes: 175
+    timeout-minutes: 300
     env:
       NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -35,4 +35,4 @@ jobs:
       - name: Offline tests
         run: python -m pytest -q tests
       - name: Find leads
-        run: python -m pipeline.find --limit "${{ github.event.inputs.limit || '100' }}"
+        run: python -m pipeline.find --limit "${{ github.event.inputs.limit || '0' }}"
