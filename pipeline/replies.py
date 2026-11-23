@@ -28,6 +28,43 @@ import requests
 from . import ai, config, notion, notify
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+FREE_MAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
+             "yahoo.co.uk", "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "msn.com",
+             "hotmail.co.uk", "outlook.co.uk", "gmx.com", "zoho.com", "yandex.com"}
+
+
+def _domain(addr_or_url):
+    d = (addr_or_url or "").lower().split("@")[-1]
+    d = re.sub(r"^https?://", "", d).split("/")[0]
+    return d[4:] if d.startswith("www.") else d
+
+
+def _norm_subject(s):
+    s = (s or "").strip().lower()
+    while True:
+        t = re.sub(r"^(re|fwd?|aw|sv)\s*:\s*", "", s)
+        if t == s:
+            return re.sub(r"\s+", " ", s)
+        s = t
+
+
+def match_lead(leads, sender, subject):
+    """Find the lead a reply belongs to: exact address, then same company domain
+    (owner answering from their own address), then the subject of our email."""
+    if sender in leads:
+        return sender
+    dom = _domain(sender)
+    if dom and dom not in FREE_MAIL:
+        for key, page in leads.items():
+            site = (page["properties"].get("Website") or {}).get("url") or ""
+            if _domain(key) == dom or _domain(site) == dom:
+                return key
+    subj = _norm_subject(subject)
+    if len(subj) >= 12:
+        for key, page in leads.items():
+            if _norm_subject(notion.read(page, "Subject")) == subj:
+                return key
+    return None
 BOOKING_LINK = os.environ.get("BOOKING_LINK", "").strip()
 
 REPLY_PROMPT = """You are writing on behalf of {sender}, who runs Monetize Studio (Meta ads + cinematic video
@@ -189,7 +226,8 @@ def run():
                     bounced.append(addr)
             continue
 
-        page = leads.get(sender)
+        key = match_lead(leads, sender, msg.get("Subject", ""))
+        page = leads.get(key) if key else None
         if not page or notion.read(page, "Status") != "Contacted":
             continue                       # only first replies here; later back-and-forth is Azeem's
         name = notion.read(page, "Business")
@@ -197,7 +235,9 @@ def run():
         intent = res.get("intent", "other")
         if intent == "out_of_office":
             continue                       # keep following up later
-        leads.pop(sender, None)
+        leads.pop(key, None)
+        if key != sender:
+            print(f"[replies] matched {sender} to lead {key} (different address)")
         summary = (res.get("summary") or body[:150]).strip()
 
         if intent == "not_interested":

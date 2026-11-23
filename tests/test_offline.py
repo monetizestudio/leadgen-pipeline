@@ -231,3 +231,17 @@ def test_send_plan_counts_today_and_tops_up(monkeypatch):
     whatsapps[:] = whatsapps[:4]
     fu, wa, q, before, owed = send.plan("na", today)
     assert len(wa) == 4 and owed - len(wa) == 11       # the other 11 are emailed
+
+
+def test_reply_matching():
+    from pipeline import replies
+    def page(email, site, subject):
+        return {"properties": {"Email": {"type": "email", "email": email},
+                               "Website": {"type": "url", "url": site},
+                               "Subject": {"type": "rich_text", "rich_text": [{"plain_text": subject}]}}}
+    leads = {"info@acme-interiors.co.uk": page("info@acme-interiors.co.uk", "https://www.acme-interiors.co.uk", "Quick idea for Acme Interiors"),
+             "hello@other.com": page("hello@other.com", "https://other.com", "A video idea for Other")}
+    assert replies.match_lead(leads, "info@acme-interiors.co.uk", "x") == "info@acme-interiors.co.uk"
+    assert replies.match_lead(leads, "john@acme-interiors.co.uk", "x") == "info@acme-interiors.co.uk"
+    assert replies.match_lead(leads, "john.smith@gmail.com", "RE: Re: Quick idea for Acme Interiors") == "info@acme-interiors.co.uk"
+    assert replies.match_lead(leads, "someone@gmail.com", "hello") is None
