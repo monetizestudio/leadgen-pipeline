@@ -1,0 +1,50 @@
+name: Phone alert
+
+# Lets the Upwork/LinkedIn cloud runs reach Azeem's phone when his laptop Chrome is offline
+# (the cloud can't reach ntfy.sh, but GitHub can). Started on demand with workflow_dispatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: "Alert title"
+        required: true
+      message:
+        description: "Alert text"
+        required: true
+      priority:
+        description: "low (silent) or urgent (loud)"
+        required: false
+        default: "urgent"
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      ALERT_TITLE: ${{ inputs.title }}
+      ALERT_MESSAGE: ${{ inputs.message }}
+      ALERT_PRIORITY: ${{ inputs.priority }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: Send ntfy alert
+        run: |
+          python - <<'EOF'
+          import os, requests
+          pr = {"low": 2, "default": 3, "high": 4, "urgent": 5}.get(os.environ.get("ALERT_PRIORITY", "urgent"), 5)
+          body = {
+              "topic": os.environ["NTFY_TOPIC"],
+              "title": os.environ["ALERT_TITLE"][:200],
+              "message": os.environ["ALERT_MESSAGE"][:1000],
+              "priority": pr,
+              "tags": ["warning"] if pr >= 4 else [],
+          }
+          r = requests.post("https://ntfy.sh/", json=body, timeout=15)
+          print("ntfy HTTP", r.status_code)
+          r.raise_for_status()
+          EOF
