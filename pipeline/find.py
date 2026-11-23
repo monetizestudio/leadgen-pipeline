@@ -27,11 +27,12 @@ def tonight_cities():
     return [c for r in config.SEARCH_COUNTRIES for c in region_cities(r)]
 
 
-def queued_email(region):
+def queued_ready(region):
+    """Leads waiting to be counted toward a region's daily 25 (email or WhatsApp)."""
     return len(notion.query(config.LEADS_DB, {"and": [
         {"or": [{"property": "Country", "select": {"equals": c}} for c in config.REGIONS[region]]},
         {"property": "Status", "select": {"equals": "Queued"}},
-        {"property": "Channel", "select": {"equals": "Email"}}]}))
+        {"property": "Outreach day", "date": {"is_empty": True}}]}))
 
 
 def build_props(lead, res, contacts):
@@ -78,7 +79,7 @@ class Region:
 
     @property
     def short(self):
-        return max(0, self.need - self.c["email"])
+        return max(0, self.need - self.c["email"] - self.c["whatsapp"])
 
     def refill(self, seen):
         """Load the next city's businesses. False when every city (both radii) is used up."""
@@ -105,7 +106,7 @@ class Region:
     def summary(self):
         c = self.c
         rej = ", ".join(f"{k} {v}" for k, v in sorted(self.rejects.items(), key=lambda x: -x[1])) or "none"
-        s = (f"{self.name.upper()}: {c['email']}/{self.need} email leads (+{c['whatsapp']} WhatsApp). "
+        s = (f"{self.name.upper()}: {c['email'] + c['whatsapp']}/{self.need} leads ({c['whatsapp']} WhatsApp, {c['email']} email). "
              f"{c['cities']} cities > {c['found']} businesses > {c['checked']} checked > "
              f"{c['had_contact']} had contact. Rejected: {rej}; no contact {c['no_contact']}, "
              f"thin {c['thin']}, already in Leads {c['duplicate']}.")
@@ -150,7 +151,7 @@ def check_one(reg, country, city, biz, seen):
     props, channel = build_props(lead, res, site)
     notion.create_lead(props)
     c["email" if channel == "Email" else "whatsapp"] += 1
-    print(f"[{reg.name} {c['email']}/{reg.need}] {lead['name']} ({city}) via {channel}")
+    print(f"[{reg.name} {c['email'] + c['whatsapp']}/{reg.need}] {lead['name']} ({city}) via {channel}")
 
 
 def run(limit=None):
@@ -158,9 +159,9 @@ def run(limit=None):
     target = config.QUEUE_DAYS
     regions = []
     for name, per_day in config.REGION_DAILY_NEW.items():
-        have = queued_email(name)
+        have = queued_ready(name)
         regions.append(Region(name, max(0, per_day * target - have)))
-        print(f"{name}: {have} email leads queued, need {regions[-1].need} more")
+        print(f"{name}: {have} leads ready, need {regions[-1].need} more")
     if limit:  # test run: spread a small total across regions
         for r in regions:
             r.need = min(r.need, max(1, limit // len(regions)))
@@ -195,16 +196,17 @@ def run(limit=None):
             active.remove(reg)
 
     mins = int((time.time() - started) / 60)
-    found = sum(r.c["email"] for r in regions)
+    found = sum(r.c["email"] + r.c["whatsapp"] for r in regions)
+    wa = sum(r.c["whatsapp"] for r in regions)
     short = [r for r in regions if r.short]
     result = "Done" if not short else ("Partial" if found else "Failed")
-    notes = f"{found}/{total_need} email leads queued in {mins} min, {checked} businesses checked. " + \
+    notes = f"{found}/{total_need} leads queued ({wa} WhatsApp) in {mins} min, {checked} businesses checked. " + \
         " | ".join(r.summary() for r in regions)
     if out_of_time() and short:
         notes += " Stopped at the time/check limit."
     notion.log_run(f"Directories find {dt.date.today()}", "Directories find", total_need, found, result, notes)
-    per = ", ".join(f"{r.name.upper()} {r.c['email']}/{r.need}" for r in regions)
-    notify.push("Directories: leads found", f"{found}/{total_need} email leads queued ({per}). "
+    per = ", ".join(f"{r.name.upper()} {r.c['email'] + r.c['whatsapp']}/{r.need}" for r in regions)
+    notify.push("Directories: leads found", f"{found}/{total_need} leads queued, {wa} of them WhatsApp ({per}). "
                 f"{checked} businesses checked in {mins} min.", tags="mag")
     if total_need and checked == 0:
         raise RuntimeError("No businesses could be checked. " + notes)

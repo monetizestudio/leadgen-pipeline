@@ -203,24 +203,31 @@ def test_send_plan_counts_today_and_tops_up(monkeypatch):
     from pipeline import send
     today = d.date(2026, 11, 23)
 
-    def page(country, status, touches=0, last=None, found="2026-11-20"):
+    def page(country, touches=0, last=None, found="2026-11-20"):
         return {"id": "x", "properties": {
             "Country": {"type": "select", "select": {"name": country}},
             "Date found": {"type": "date", "date": {"start": found}},
             "Last touch": {"type": "date", "date": {"start": last} if last else None},
             "Touches": {"type": "number", "number": touches}}}
 
-    queued = [page("Canada", "Queued", found="2026-11-01")] + [page("US", "Queued") for _ in range(40)]
-    contacted = [page("US", "Contacted", 1, "2026-11-20"), page("US", "Contacted", 1, "2026-11-22")]
+    emails = [page("Canada", found="2026-11-01")] + [page("US") for _ in range(40)]
+    whatsapps = [page("US") for _ in range(20)]
+    contacted = [page("US", 1, "2026-11-20"), page("US", 1, "2026-11-22")]
 
     def fake_query(db, f):
-        text = str(f)
-        if "Date contacted" in text:
-            return [1] * 10                     # 10 already sent today by an earlier run
-        return queued if "Queued" in text else contacted
+        t = str(f)
+        if "'equals': '2026-11-23'" in t:
+            return [1] * 10                     # 10 already done today by an earlier run
+        if "Contacted" in t:
+            return contacted
+        return whatsapps if "WhatsApp" in t else emails
 
     monkeypatch.setattr(send.notion, "query", fake_query)
-    fu, q, before, owed = send.plan("na", today)
+    fu, wa, q, before, owed = send.plan("na", today)
     assert before == 10 and owed == 15          # only the rest of today's 25
-    assert len(fu) == 1                         # only the day-3 follow-up is due
+    assert len(wa) == 15                        # WhatsApp first: fills all 15
+    assert len(fu) == 1                         # only the day-3 email follow-up is due
     assert send.notion.read(q[0], "Country") == "US"   # US before Canada
+    whatsapps[:] = whatsapps[:4]
+    fu, wa, q, before, owed = send.plan("na", today)
+    assert len(wa) == 4 and owed - len(wa) == 11       # the other 11 are emailed

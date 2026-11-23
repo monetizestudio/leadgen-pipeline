@@ -49,30 +49,39 @@ GMAIL_LIMIT_SIGNS = ("421", "4.7.0", "5.4.5", "sending limit", "quota", "rate li
                      "temporarily", "suspended")
 
 
+def _uncounted_queued(region, channel):
+    pages = notion.query(config.LEADS_DB, {"and": [
+        _countries_filter(config.REGIONS[region]),
+        {"property": "Channel", "select": {"equals": channel}},
+        {"property": "Status", "select": {"equals": "Queued"}},
+        {"property": "Outreach day", "date": {"is_empty": True}}]})
+    first = config.SEARCH_COUNTRIES[region]     # US before Canada, then oldest first
+    pages.sort(key=lambda p: (0 if notion.read(p, "Country") in first else 1, notion.read(p, "Date found") or ""))
+    return pages
+
+
 def plan(region, today, max_new=None):
-    """What this run should send: (follow-ups, new leads, new already sent today, new still owed).
-    Counting what already went out today (region time) makes repeat/late runs safe."""
+    """What this run should do: (follow-ups, WhatsApp leads to save, email leads, done today, still owed).
+    A region's 25 a day = WhatsApp leads saved for Azeem's Sunday batch (first priority) + first emails.
+    Counting what already went out today (region time, "Outreach day") makes repeat/late runs safe."""
     countries = config.REGIONS[region]
-    base = [_countries_filter(countries), {"property": "Channel", "select": {"equals": "Email"}}]
-    sent_today = len(notion.query(config.LEADS_DB, {"and": [
+    done_today = len(notion.query(config.LEADS_DB, {"and": [
         _countries_filter(countries),
-        {"property": "Date contacted", "date": {"equals": today.isoformat()}}]}))
-    owed = max(0, config.REGION_DAILY_NEW[region] - sent_today)
+        {"property": "Outreach day", "date": {"equals": today.isoformat()}}]}))
+    owed = max(0, config.REGION_DAILY_NEW[region] - done_today)
     if max_new is not None:
         owed = min(owed, max_new)
-    queued = notion.query(config.LEADS_DB, {"and": base + [
-        {"property": "Status", "select": {"equals": "Queued"}}]})
-    # search countries first (US before Canada), then oldest leads first
-    first = config.SEARCH_COUNTRIES[region]
-    queued.sort(key=lambda p: (0 if notion.read(p, "Country") in first else 1, notion.read(p, "Date found") or ""))
-    contacted = notion.query(config.LEADS_DB, {"and": base + [
+    whatsapp = _uncounted_queued(region, "WhatsApp")[:owed]
+    queued = _uncounted_queued(region, "Email")
+    contacted = notion.query(config.LEADS_DB, {"and": [
+        _countries_filter(countries), {"property": "Channel", "select": {"equals": "Email"}},
         {"property": "Status", "select": {"equals": "Contacted"}}]})
     followups = []
     for p in contacted:
         touches = int(p["properties"]["Touches"]["number"] or 0)
         if touches in (1, 2) and _due(p, touches + 1, today):
             followups.append((p, touches + 1))
-    return followups[:config.MAX_FOLLOWUPS_PER_RUN], queued, sent_today, owed
+    return followups[:config.MAX_FOLLOWUPS_PER_RUN], whatsapp, queued, done_today, owed
 
 
 def _address(page):
@@ -83,15 +92,21 @@ def _address(page):
 
 def run(region, max_new=None):
     today = config.region_today(region)
-    followups, queued, sent_before, owed = plan(region, today, max_new)
+    followups, whatsapp, queued, sent_before, owed = plan(region, today, max_new)
     if not followups and owed == 0:
         print(f"{region}: {sent_before} new emails already sent today and no follow-ups due. Nothing to do.")
         return
     goal = config.REGION_DAILY_NEW[region]
+    # WhatsApp first: these just get counted for today and wait for the Sunday bulk send (no follow-ups)
+    for page in whatsapp:
+        notion.update_page(page["id"], {"Outreach day": notion.date(today)})
+    wa_saved = len(whatsapp)
+    email_owed = owed - wa_saved
+    to_email = min(email_owed, len(queued))
     notify.push(f"🚀 {region.upper()} outreach started",
-                f"Sending {min(owed, len(queued))} first emails ({sent_before}/{goal} already out today) "
-                f"and {len(followups)} follow-ups. About {(min(owed, len(queued)) + len(followups)) * 3 // 2} min.",
-                tags="rocket")
+                f"{wa_saved} WhatsApp leads saved for Sunday, now sending {to_email} emails "
+                f"and {len(followups)} follow-ups ({sent_before}/{goal} were already done today). "
+                f"About {(to_email + len(followups)) * 3 // 2} min.", tags="rocket")
 
     sent_new, sent_fu, skipped, errors = 0, 0, 0, []
     paused = ""
@@ -119,7 +134,7 @@ def run(region, max_new=None):
             time.sleep(random.randint(*config.SEND_DELAY_SEC))
 
         for page in ([] if paused else queued):
-            if sent_new >= owed:
+            if sent_new >= email_owed:
                 break
             to = _address(page)
             if not to:
@@ -135,9 +150,10 @@ def run(region, max_new=None):
                     "Touches": {"number": 1},
                     "Date contacted": notion.date(today),
                     "Last touch": notion.date(today),
+                    "Outreach day": notion.date(today),
                 })
                 sent_new += 1
-                print(f"sent {sent_new}/{owed}: {to}")
+                print(f"sent {sent_new}/{email_owed}: {to}")
             except smtplib.SMTPRecipientsRefused:
                 notion.update_page(page["id"], {"Status": notion.select("Bounced")})
                 skipped += 1
@@ -152,14 +168,14 @@ def run(region, max_new=None):
         _countries_filter(config.REGIONS[region]),
         {"property": "Channel", "select": {"equals": "WhatsApp"}},
         {"property": "Status", "select": {"equals": "Queued"}}]}))
-    total_new = sent_before + sent_new
+    total_new = sent_before + wa_saved + sent_new
     short = total_new < goal and max_new is None
     result = "Failed" if paused else ("Partial" if short or errors else "Done")
-    notes = (f"{region.upper()}: {sent_new} first emails this run ({total_new}/{goal} today), "
-             f"{sent_fu} follow-ups. {wa_waiting} WhatsApp leads waiting for bulk sender. "
+    notes = (f"{region.upper()}: {total_new}/{goal} contacted today. This run: {wa_saved} WhatsApp saved, "
+             f"{sent_new} first emails, {sent_fu} follow-ups. {wa_waiting} WhatsApp leads waiting for Sunday. "
              f"Bad addresses skipped: {skipped}. Errors: {len(errors)}")
     if short and not paused:
-        notes += f". SHORT: ran out of queued {region.upper()} email leads."
+        notes += f". SHORT: ran out of queued {region.upper()} leads."
     if errors:
         notes += " | " + "; ".join(errors[:3])
     if paused:
@@ -169,7 +185,8 @@ def run(region, max_new=None):
         notify.push("⛔ Gmail limit hit, sending paused", notes, priority="urgent", tags="no_entry")
     else:
         flag = "⚠️ " if short else "✉️ "
-        notify.push(f"{flag}Emails sent: {region.upper()} {total_new}/{goal}", notes, tags="email")
+        notify.push(f"{flag}{region.upper()} done {total_new}/{goal}: {sent_new} emails + {wa_saved} WhatsApp",
+                    notes, tags="email")
 
 
 def main():
