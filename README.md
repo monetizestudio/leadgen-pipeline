@@ -9,8 +9,13 @@ Runs free on GitHub Actions. No laptop needed.
   and queues 100 leads in Notion (Lead Gen HQ > Leads).
 - **Each region's morning:** emails that region's queued leads at a slow, random pace (Australia 3:30 AM,
   UAE 10:30 AM, UK 1:30 PM, US/Canada 7:30 PM Karachi), plus the day-3 and day-7 follow-ups.
-- **Every 2 hours:** checks Gmail for replies. A reply marks the lead **Replied** and pings your phone 🔥.
-  Bounces are marked **Bounced**. "Not interested" is marked and never contacted again.
+- **Every 2 hours:** reads lead replies and answers them by the reply playbook (`pipeline/playbook.py`):
+  asked for the audit -> the audit is written from their site and sent; wants a call/details/price -> plain
+  answer + booking link; not now -> Status Later, one check-in after 30 days; not interested -> never contacted
+  again; sensitive/unclear -> Gmail draft + loud ping. Follow-up replies are handled too (max 5 per lead).
+  Interested leads get 2 booking nudges (day 3, day 7). A Calendly booking -> Status **Meeting** (closed lead).
+  Outbox: text in a lead's Notion **Send next** field is sent in their email thread on the next run.
+  Bounces are marked **Bounced**.
 - **WhatsApp leads** (businesses with a WhatsApp button on their site) are queued with a ready message.
   In Notion, filter Leads by Channel = WhatsApp, Status = Queued, and send them through your WhatsApp bulk sender.
 - Every run logs a row in **Daily Runs** (target, done, failed or partial, notes).

@@ -263,3 +263,44 @@ def test_ping_levels(monkeypatch):
     notify.action("Zoom booked with X", "m"); notify.fyi("UK done 25/25", "m")
     assert sent[0] == ("🔴 ACTION: Zoom booked with X", "urgent")
     assert sent[1] == ("UK done 25/25", "low")
+
+
+def test_playbook_covers_every_intent():
+    from pipeline import playbook
+    assert playbook.normalize("interested") == "ready_to_talk"
+    assert playbook.normalize("Wants Audit") == "wants_audit"
+    assert playbook.normalize("nonsense") == "other"
+    assert playbook.plan("wants_audit") == {"send": True, "status": "Interested", "days": 3, "ping": False}
+    assert playbook.plan("not_now")["status"] == "Later"
+    assert not playbook.plan("sensitive")["send"] and not playbook.plan("not_interested")["send"]
+    for intent in playbook.PLAYBOOK:
+        if intent not in ("not_interested", "sensitive", "other"):
+            assert intent in playbook.REPLY_PROMPT
+    f = dict(first="Tony", company="Clamroc", link="https://x.y/z", sender="Azeem")
+    for t in playbook.NUDGES + [playbook.LATER_CHECKIN]:
+        out = t.format(**f)
+        assert "https://x.y/z" in out and "{" not in out
+
+
+def test_new_reply_dedupe():
+    from email.message import EmailMessage
+    from pipeline import replies
+
+    def page(status, last_id="", last_touch="2026-11-25"):
+        def rt(v):
+            return {"type": "rich_text", "rich_text": [{"plain_text": v}]}
+        return {"properties": {"Status": {"type": "select", "select": {"name": status}},
+                               "Last reply ID": rt(last_id),
+                               "Last touch": {"type": "date", "date": {"start": last_touch}}}}
+    m = EmailMessage(); m["Message-ID"] = "<a@x>"; m["Date"] = "Wed, 25 Nov 2026 02:20:00 +0000"
+    assert replies.is_new_reply(page("Contacted"), m)
+    assert not replies.is_new_reply(page("Interested", "<a@x>"), m)          # already answered
+    assert replies.is_new_reply(page("Interested", "<old@x>"), m)            # a new message
+    assert not replies.is_new_reply(page("Interested", "", "2026-11-25"), m)  # legacy lead, same day as our reply
+    assert replies.is_new_reply(page("Interested", "", "2026-11-24"), m)
+
+
+def test_wants_site_only_for_audit_like_replies():
+    from pipeline import replies
+    assert replies.wants_site("Yes please send the audit")
+    assert not replies.wants_site("How much do you charge?")

@@ -1,16 +1,21 @@
-"""Every 2 hours: check Gmail for replies and bounces from leads.
+"""Every 2 hours: read lead replies in the outreach Gmail and move every lead toward a booked Zoom.
 
-- Bounce          -> Status Bounced
-- Not interested  -> Status Not interested (never contacted again)
-- Out of office   -> ignored, follow-ups continue
-- Interested / wants details / question -> Gemini writes a reply that answers them and steers to a
-  quick Zoom call (booking link). It is SENT automatically, in the same email thread.
-  Status -> Interested. If they don't book in 3 days, one nudge is sent.
-- Sensitive (angry, complaint, legal, asks for a phone call, anything risky) -> saved as a Gmail draft
-  and your phone gets a ping instead of auto-sending.
-- Calendly "New Event" email for a lead -> Status Meeting + 📅 ping. That's your cue: Zoom call.
+The full reply playbook (which reply gets which answer) lives in pipeline/playbook.py. In short:
+- Asked for the audit      -> the audit is written from their website and SENT, ending with the booking link
+- Wants a call / a time    -> booking link (time proposed also pings Azeem)
+- Details / price question -> plain answer + free audit offer + booking link (no invented prices)
+- Not now                  -> friendly "I'll check back", Status Later, one check-in after 30 days
+- Referral                 -> thanks + ask for the intro, ping Azeem
+- Not interested           -> Status Not interested, never contacted again
+- Sensitive / unclear      -> Gmail draft + loud ping, nothing sent
+- Bounce -> Bounced. Out of office -> ignored, follow-ups continue.
+- Calendly "New Event" email for a lead -> Status Meeting + loud ping (closed lead: Azeem takes the Zoom).
+Follow-up replies are handled too (whole conversation as context), up to playbook.MAX_AUTO_REPLIES per lead.
+Interested leads that don't book get 2 nudges (day 3, day 7). Later leads get one check-in at day 30.
+Outbox: text in a lead's Notion "Send next" field is sent in the same thread on the next run, then cleared.
+Every message in and out is logged in the lead's "Conversation" field (newest first).
 
-Reads your inbox read-only (BODY.PEEK): never marks anything read.
+Reads the inbox read-only (BODY.PEEK): never marks anything read.
 """
 import datetime as dt
 import email
@@ -25,7 +30,9 @@ from email.utils import parseaddr
 
 import requests
 
-from . import ai, config, notion, notify
+from email.utils import parsedate_to_datetime
+
+from . import ai, config, notion, notify, playbook, scrape
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 FREE_MAIL = {"gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "yahoo.com",
@@ -67,28 +74,6 @@ def match_lead(leads, sender, subject):
     return None
 BOOKING_LINK = os.environ.get("BOOKING_LINK", "").strip()
 
-REPLY_PROMPT = """You are writing on behalf of {sender}, who runs Monetize Studio (Meta ads + cinematic video
-content for architecture, interior design and real estate businesses).
-
-We emailed this lead:
-\"\"\"{ours}\"\"\"
-
-They replied:
-\"\"\"{theirs}\"\"\"
-
-Classify their reply and, if useful, draft {sender}'s answer. Reply with JSON only:
-- "intent": one of "interested", "wants_details", "question", "not_interested", "out_of_office",
-  "sensitive", "other". Use "sensitive" if they are angry, complain, mention legal/spam/reporting,
-  ask for a phone number or call right now, ask for something we can't answer, or you are unsure.
-- "summary": one short line, what they said
-- "draft": for interested / wants_details / question: a short, warm, human reply (60-110 words) that
-  answers what they asked in plain words, then invites them to a quick Zoom call using this
-  booking link: {link}
-  Rules: never invent prices, results, client names or guarantees. If they ask about price, say it depends
-  on scope and is easiest to cover on the call. No "I hope this finds you well". Sign off as {first}.
-  For other intents (including sensitive) still write a careful, polite draft for a human to check.
-"""
-
 
 def _body(msg):
     for part in msg.walk():
@@ -100,18 +85,6 @@ def _body(msg):
             # keep only their new text, not the quoted thread below it
             return re.split(r"\n(?:On .+ wrote:|-{2,}\s*Original Message|>)", text, maxsplit=1)[0].strip()
     return ""
-
-
-def classify(ours, theirs):
-    prompt = REPLY_PROMPT.format(sender=config.SENDER_NAME, first=config.SENDER_NAME.split()[0],
-                                 ours=ours[:2500], theirs=theirs[:3000],
-                                 link=BOOKING_LINK or "[ADD BOOKING LINK]")
-    try:
-        data = ai._call(prompt)
-        return json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
-    except Exception as e:
-        print(f"[replies] AI could not read reply: {config.redact(e)[:150]}")
-        return {"intent": "retry", "summary": theirs[:150], "draft": ""}
 
 
 OOO_RE = re.compile(r"out of (the )?office|on (annual )?leave|automatic reply|auto[- ]?reply|away from (the )?office"
@@ -138,10 +111,6 @@ def save_draft(box, to, subject, body, in_reply_to):
     box.append('"[Gmail]/Drafts"', r"(\Draft)", imaplib.Time2Internaldate(time.time()), msg.as_bytes())
 
 
-NUDGE = ("Hi {first}, just making it easy: here's the link to grab a quick call whenever suits you. "
-         "I'll come prepared with a few ideas for {company}.\n\n{link}\n\n{sender}")
-
-
 def _smtp():
     s = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60)
     s.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
@@ -161,31 +130,6 @@ def send_reply(to, subject, body, in_reply_to=None):
         s.send_message(msg)
 
 
-def send_nudges():
-    """Interested leads that haven't booked 3 days after our reply get one nudge."""
-    if not BOOKING_LINK:
-        return 0
-    today = dt.date.today().isoformat()
-    due = notion.query(config.LEADS_DB, {"and": [
-        {"property": "Status", "select": {"equals": "Interested"}},
-        {"property": "Next follow-up", "date": {"on_or_before": today}}]})
-    sent = 0
-    for page in due:
-        to = page["properties"]["Email"]["email"]
-        if not to:
-            continue
-        body = NUDGE.format(first=notion.read(page, "First name") or "there",
-                            company=notion.read(page, "Business"), link=BOOKING_LINK,
-                            sender=config.SENDER_NAME)
-        try:
-            send_reply(to, notion.read(page, "Subject") or "Quick call", body)
-            notion.update_page(page["id"], {"Next follow-up": {"date": None}, "Last touch": notion.date()})
-            sent += 1
-        except Exception as e:
-            print(f"[nudge] {to}: {config.redact(e)[:120]}")
-    return sent
-
-
 def _calendly_invitee(msg, body):
     sender = parseaddr(msg.get("From", ""))[1].lower()
     subject = msg.get("Subject", "")
@@ -197,10 +141,223 @@ def _calendly_invitee(msg, body):
     return None
 
 
+
+
+# ---------- conversation log + AI ----------
+def _log(page, line):
+    """Prepend one line to the lead's Conversation field (newest first, trimmed to Notion's limit)."""
+    old = notion.read(page, "Conversation") or ""
+    new = f"[{dt.date.today().isoformat()}] {line.strip()}\n{old}".strip()
+    page["properties"]["Conversation"] = {"type": "rich_text", "rich_text": [{"plain_text": new[:1900]}]}
+    return notion.text(new[:1900])
+
+
+def _site_text(page):
+    site = (page["properties"].get("Website") or {}).get("url") or ""
+    if not site:
+        return ""
+    try:
+        return scrape.fetch_site(site)["text"][:5000]
+    except Exception as e:
+        print(f"[replies] could not read site for audit: {config.redact(e)[:100]}")
+        return ""
+
+
+def classify(page, theirs, site_text=""):
+    first = config.SENDER_NAME.split()[0]
+    prompt = playbook.REPLY_PROMPT.format(
+        sender=config.SENDER_NAME, first=first, link=BOOKING_LINK or "[ADD BOOKING LINK]",
+        company=notion.read(page, "Business") or "", niche=notion.read(page, "Niche") or "",
+        city=notion.read(page, "City") or "", country=notion.read(page, "Country") or "",
+        lead_first=notion.read(page, "First name") or "unknown",
+        ours=(notion.read(page, "Message") or "")[:2500], history=(notion.read(page, "Conversation") or "")[:2500],
+        theirs=theirs[:3000], site=site_text[:5000])
+    try:
+        data = ai._call(prompt)
+        res = json.loads(data["candidates"][0]["content"]["parts"][0]["text"])
+        if isinstance(res, list):
+            res = next((x for x in res if isinstance(x, dict)), {})
+        res["intent"] = playbook.normalize(res.get("intent"))
+        return res
+    except Exception as e:
+        print(f"[replies] AI could not read reply: {config.redact(e)[:150]}")
+        return {"intent": "retry", "summary": theirs[:150], "draft": ""}
+
+
+def wants_site(theirs):
+    """Only fetch their website when the audit is likely needed (saves time on other replies)."""
+    return bool(re.search(r"\b(yes|sure|audit|sample|send|show|example|go ahead|please do|interested)\b",
+                          theirs or "", re.I))
+
+
+def _msg_date(msg):
+    try:
+        return parsedate_to_datetime(msg.get("Date")).date()
+    except Exception:
+        return dt.date.today()
+
+
+def is_new_reply(page, msg):
+    """True if this message hasn't been handled yet. First replies (Status Contacted) are always new.
+    Later replies: Message-ID differs from the last one handled; for older leads with no ID stored, only
+    messages dated after our last touch count (so nothing already answered is answered twice)."""
+    status = notion.read(page, "Status")
+    mid = (msg.get("Message-ID") or "").strip()
+    last_id = (notion.read(page, "Last reply ID") or "").strip()
+    if mid and mid == last_id:
+        return False
+    if status == "Contacted":
+        return True
+    if last_id:
+        return True
+    last_touch = notion.read(page, "Last touch")
+    return bool(last_touch) and _msg_date(msg).isoformat() > last_touch
+
+
+def _num(page, name):
+    return int(notion.read(page, name) or 0)
+
+
+# ---------- nudges / check-ins ----------
+def send_nudges():
+    """Interested leads that haven't booked: nudge 1 at their next-touch date, nudge 2 four days later.
+    Later leads: one check-in at their next-touch date."""
+    if not BOOKING_LINK:
+        return 0
+    today = dt.date.today()
+    sent = 0
+    for status in ("Interested", "Later"):
+        due = notion.query(config.LEADS_DB, {"and": [
+            {"property": "Status", "select": {"equals": status}},
+            {"property": "Next follow-up", "date": {"on_or_before": today.isoformat()}}]})
+        for page in due:
+            to = page["properties"]["Email"]["email"]
+            if not to:
+                continue
+            n = _num(page, "Nudges")
+            if status == "Interested" and n >= len(playbook.NUDGES):
+                notion.update_page(page["id"], {"Next follow-up": {"date": None}})
+                continue
+            tpl = playbook.NUDGES[n] if status == "Interested" else playbook.LATER_CHECKIN
+            body = tpl.format(first=notion.read(page, "First name") or "there",
+                              company=notion.read(page, "Business"), link=BOOKING_LINK,
+                              sender=config.SENDER_NAME.split()[0])
+            nxt = None
+            if status == "Interested" and n < len(playbook.NUDGE_GAPS):
+                nxt = notion.date(today + dt.timedelta(days=playbook.NUDGE_GAPS[n]))
+            try:
+                send_reply(to, notion.read(page, "Subject") or "Quick call", body)
+                label = f"nudge {n + 1}" if status == "Interested" else "30-day check-in"
+                notion.update_page(page["id"], {"Next follow-up": nxt or {"date": None}, "Last touch": notion.date(),
+                                                "Nudges": {"number": n + 1},
+                                                "Conversation": _log(page, f"WE ({label}): {body[:300]}")})
+                sent += 1
+            except Exception as e:
+                print(f"[nudge] {to}: {config.redact(e)[:120]}")
+    return sent
+
+
+# ---------- outbox: hand-written emails from Notion "Send next" ----------
+def send_outbox(latest):
+    """Send each lead's "Send next" text in the same thread as their latest message, then clear it."""
+    pages = notion.query(config.LEADS_DB, {"property": "Send next", "rich_text": {"is_not_empty": True}})
+    sent = []
+    for page in pages:
+        status = notion.read(page, "Status")
+        to = page["properties"]["Email"]["email"]
+        body = (notion.read(page, "Send next") or "").strip()
+        if not to or not body or status in ("Not interested", "Bounced"):
+            continue
+        body = body.replace("{link}", BOOKING_LINK)
+        msg = latest.get(to.lower())
+        reply_to = parseaddr(msg.get("From", ""))[1].lower() if msg else to
+        subject = msg.get("Subject", "") if msg else (notion.read(page, "Subject") or "Quick follow-up")
+        try:
+            send_reply(reply_to, subject, body, msg.get("Message-ID") if msg else None)
+        except Exception as e:
+            print(f"[outbox] send failed: {config.redact(e)[:120]}")
+            continue
+        props = {"Send next": notion.text(""), "Last touch": notion.date(),
+                 "Auto replies": {"number": _num(page, "Auto replies") + 1},
+                 "Conversation": _log(page, f"WE (hand-written): {body[:400]}")}
+        if msg and msg.get("Message-ID"):
+            props["Last reply ID"] = notion.text(msg.get("Message-ID").strip())
+        if status in ("Contacted", "Replied"):
+            props["Status"] = notion.select("Interested")
+        if status in ("Contacted", "Replied", "Interested") and not notion.read(page, "Next follow-up"):
+            props["Next follow-up"] = notion.date(dt.date.today() + dt.timedelta(days=3))
+        notion.update_page(page["id"], props)
+        sent.append(notion.read(page, "Business"))
+    return sent
+
+
+# ---------- one reply ----------
+def handle_reply(box, page, msg, sender, body, counts):
+    name = notion.read(page, "Business")
+    status = notion.read(page, "Status")
+    res = classify(page, body, _site_text(page) if wants_site(body) else "")
+    intent = res.get("intent", "other")
+    if intent == "retry":
+        return False                       # AI down: the next run (2 h) reads it again
+    summary = (res.get("summary") or body[:150]).strip()
+    mid = (msg.get("Message-ID") or "").strip()
+    step = playbook.plan(intent)
+    convo = _log(page, f"THEM ({intent}): {body[:300]}")
+    base = {"Reply": notion.text(summary), "Conversation": convo}
+    if mid:
+        base["Last reply ID"] = notion.text(mid)
+
+    if intent == "not_interested":
+        notion.update_page(page["id"], {**base, "Status": notion.select("Not interested"),
+                                        "Next follow-up": {"date": None}})
+        counts["unsub"] += 1
+        return True
+
+    draft = (res.get("draft") or "").strip()
+    subject = msg.get("Subject", notion.read(page, "Subject") or "")
+    auto_n = _num(page, "Auto replies")
+    safe = (step["send"] and BOOKING_LINK and draft and BOOKING_LINK in draft
+            and auto_n < playbook.MAX_AUTO_REPLIES)
+    if safe:
+        try:
+            send_reply(sender, subject, draft, msg.get("Message-ID"))
+            props = {**base, "Status": notion.select(step["status"]), "Last touch": notion.date(),
+                     "Auto replies": {"number": auto_n + 1}, "Nudges": {"number": 0},
+                     "Next follow-up": notion.date(dt.date.today() + dt.timedelta(days=step["days"])),
+                     "Conversation": _log(page, f"WE ({intent}): {draft[:400]}")}
+            notion.update_page(page["id"], props)
+            counts["auto"].append(f"{name} ({intent})")
+            if step["ping"]:
+                notify.action(f"{name}: {intent.replace('_', ' ')}", f"{summary}\nAnswered with the booking link. "
+                              "Watch for the Calendly booking.", tags="fire")
+            else:
+                notify.fyi(f"🔥 {name} replied ({intent.replace('_', ' ')}), answered (nothing to do)", summary,
+                           tags="fire")
+            return True
+        except Exception as e:
+            print(f"[replies] auto-send failed: {config.redact(e)[:120]}")
+    # risky, unclear, over the auto-reply limit, or the send failed: keep it as a draft
+    notion.update_page(page["id"], {**base, "Status": notion.select("Replied"), "Last touch": notion.date()})
+    try:
+        if draft:
+            save_draft(box, sender, subject, draft, msg.get("Message-ID"))
+        note = "Draft is in the outreach Gmail > Drafts." if draft else "Reply from the outreach Gmail."
+    except Exception:
+        note = "Reply from the outreach Gmail."
+    counts["held"].append(name)
+    if len(body.strip()) >= 3:             # blank reply: logged in Notion, no ping
+        notify.action(f"{name} replied ({intent})", f"{summary}\n{note} Claude will also pick it up.",
+                      tags="speech_balloon")
+    return True
+
+
+ACTIVE = ("Contacted", "Replied", "Interested", "Later")
+
+
 def run():
     nudged = send_nudges()
     pages = []
-    for status in ("Contacted", "Replied", "Interested"):
+    for status in ACTIVE:
         pages += notion.query(config.LEADS_DB, {"property": "Status", "select": {"equals": status}})
     leads = {p["properties"]["Email"]["email"].lower(): p for p in pages if p["properties"]["Email"]["email"]}
     if not leads:
@@ -211,8 +368,10 @@ def run():
     box.select("INBOX", readonly=True)
     _, ids = box.search(None, f'(SINCE "{since}")')
 
-    auto, held, meetings, bounced, unsub = [], [], [], [], 0
-    for mid in ids[0].split():
+    counts = {"auto": [], "held": [], "unsub": 0}
+    meetings, bounced = [], []
+    latest = {}                            # lead key -> (msg, sender, body): newest message from each lead
+    for mid in ids[0].split():             # IMAP returns oldest first, so later messages overwrite
         _, data = box.fetch(mid, "(BODY.PEEK[])")
         msg = email.message_from_bytes(data[0][1])
         sender = parseaddr(msg.get("From", ""))[1].lower()
@@ -220,11 +379,12 @@ def run():
 
         invitee = _calendly_invitee(msg, body)
         if invitee:
-            page = leads.pop(invitee, None)
-            if page:
+            page = leads.get(invitee)
+            if page and notion.read(page, "Status") != "Meeting":
                 name = notion.read(page, "Business")
-                notion.update_page(page["id"], {"Status": notion.select("Meeting"),
-                                                "Next follow-up": {"date": None}})
+                notion.update_page(page["id"], {"Status": notion.select("Meeting"), "Next follow-up": {"date": None},
+                                                "Conversation": _log(page, "BOOKED a Zoom via Calendly")})
+                page["properties"]["Status"] = {"type": "select", "select": {"name": "Meeting"}}
                 meetings.append(name)
                 notify.action(f"Zoom booked with {name}", f"{invitee} booked a call. Check your calendar and prepare.",
                               tags="calendar")
@@ -232,73 +392,38 @@ def run():
 
         if "mailer-daemon" in sender or "postmaster" in sender:
             for addr in EMAIL_RE.findall(body):
-                page = leads.pop(addr.lower(), None)
+                page = leads.get(addr.lower())
                 if page and notion.read(page, "Status") == "Contacted":
                     notion.update_page(page["id"], {"Status": notion.select("Bounced")})
+                    page["properties"]["Status"] = {"type": "select", "select": {"name": "Bounced"}}
                     bounced.append(addr)
             continue
 
         key = match_lead(leads, sender, msg.get("Subject", ""))
-        page = leads.get(key) if key else None
-        if not page or notion.read(page, "Status") != "Contacted":
-            continue                       # only first replies here; later back-and-forth is Azeem's
-        name = notion.read(page, "Business")
-        if is_auto_reply(msg, body):
-            continue                       # out of office: keep following up later
-        res = classify(notion.read(page, "Message") or "", body)
-        intent = res.get("intent", "other")
-        if intent == "retry":
-            continue                       # AI down: leave it, the next run (2 h) reads it again
-        if intent == "out_of_office":
-            continue                       # keep following up later
-        leads.pop(key, None)
-        if key != sender:
-            print(f"[replies] matched {sender} to lead {key} (different address)")
-        summary = (res.get("summary") or body[:150]).strip()
+        if not key or is_auto_reply(msg, body):
+            continue                       # not a lead, or out of office: follow-ups continue
+        latest[key] = (msg, sender, body)
 
-        if intent == "not_interested":
-            notion.update_page(page["id"], {"Status": notion.select("Not interested"),
-                                            "Reply": notion.text(summary)})
-            unsub += 1
+    outbox = send_outbox({k: v[0] for k, v in latest.items()})
+    for key, (msg, sender, body) in latest.items():
+        page = leads[key]
+        if notion.read(page, "Status") not in ACTIVE or notion.read(page, "Business") in outbox:
             continue
-
-        draft = (res.get("draft") or "").strip()
-        subject = msg.get("Subject", notion.read(page, "Subject") or "")
-        safe = intent in ("interested", "wants_details", "question") and BOOKING_LINK and draft \
-            and BOOKING_LINK in draft
-        if safe:
-            try:
-                send_reply(sender, subject, draft, msg.get("Message-ID"))
-                notion.update_page(page["id"], {
-                    "Status": notion.select("Interested"), "Reply": notion.text(summary),
-                    "Last touch": notion.date(),
-                    "Next follow-up": notion.date(dt.date.today() + dt.timedelta(days=3))})
-                auto.append(name)
-                notify.fyi(f"🔥 {name} replied, booking link sent (nothing to do)", summary, tags="fire")
-                continue
-            except Exception as e:
-                print(f"[replies] auto-send failed for {sender}: {config.redact(e)[:120]}")
-        # anything risky or failed: keep it for Azeem as a draft
-        notion.update_page(page["id"], {"Status": notion.select("Replied"), "Reply": notion.text(summary),
-                                        "Last touch": notion.date()})
-        try:
-            if draft:
-                save_draft(box, sender, subject, draft, msg.get("Message-ID"))
-            note = "Needs you: draft is in Gmail > Drafts." if draft else "Needs you: reply from Gmail."
-        except Exception:
-            note = "Needs you: reply from Gmail."
-        held.append(name)
-        if len(body.strip()) < 3:
-            continue                       # blank reply: logged in Notion, no ping
-        notify.action(f"{name} replied, answer them", f"{summary}\n{note}", tags="speech_balloon")
+        if not is_new_reply(page, msg):
+            continue
+        if key != sender:
+            print("[replies] matched a reply from a different address to its lead")
+        handle_reply(box, page, msg, sender, body, counts)
     box.logout()
 
-    if auto or held or meetings or bounced or unsub or nudged:
-        notes = (f"Meetings booked: {', '.join(meetings) or 'none'}. Auto-replied with booking link: "
-                 f"{', '.join(auto) or 'none'}. Held for Azeem: {', '.join(held) or 'none'}. "
-                 f"Nudges sent: {nudged}. Not interested: {unsub}. Bounced: {len(bounced)}.")
+    auto, held, unsub = counts["auto"], counts["held"], counts["unsub"]
+    if auto or held or meetings or bounced or unsub or nudged or outbox:
+        notes = (f"Meetings booked: {', '.join(meetings) or 'none'}. Answered automatically: "
+                 f"{', '.join(auto) or 'none'}. Hand-written sent: {', '.join(outbox) or 'none'}. "
+                 f"Held (draft): {', '.join(held) or 'none'}. Nudges/check-ins sent: {nudged}. "
+                 f"Not interested: {unsub}. Bounced: {len(bounced)}.")
         notion.log_run(f"Reply check {dt.datetime.now():%Y-%m-%d %H:%M}", "Directories send",
-                       0, len(auto) + len(meetings), "Done", notes)
+                       0, len(auto) + len(meetings) + len(outbox), "Done", notes)
 
 
 if __name__ == "__main__":
