@@ -17,6 +17,8 @@ wants_details     "what exactly do you do / how does it work"   2-4 plain senten
                                                                 like theirs + offer the audit + booking link
 price             "how much", "what does it cost"               no numbers invented: depends on scope (videos,    Interested   3 days
                                                                 ad spend); free audit first, exact quote on call
+says_booked       "booked for Tuesday", "done, see you then"    short thanks + "see you then"; loud ping so     Interested   2 days
+                                                                Azeem confirms it in Calendly -> Meeting
 not_now           "maybe later", "busy now", "next quarter"     no pressure, ask to check back, offer the audit   Later        30 days
                                                                 whenever useful                                   (one check-in)
 referral          "talk to X", "send to marketing@"             thanks + ask for intro / the right address; ping   Interested   4 days
@@ -28,6 +30,9 @@ other             anything unclear                              draft only + lou
 Follow-up replies (the lead writes again after our answer) go through the same playbook with the whole
 conversation as context, up to MAX_AUTO_REPLIES per lead; after that it is held for a human.
 Leads waiting on a booking get NUDGES[0] after their next-touch date, then NUDGES[1] four days later, then stop.
+Booking check: Calendly's booking emails reach Azeem's main Gmail, not the outreach inbox this code reads, so
+every email that carries the booking link also sends Azeem a "📅 CHECK: did X book?" ping. He checks and tells
+Claude "X booked"; Claude sets Status Meeting.
 Claude can also hand-write the next email for any lead: put the text in the lead's "Send next" field in Notion
 and the next reply check sends it in the same email thread ("{link}" becomes the booking link).
 """
@@ -41,6 +46,7 @@ PLAYBOOK = {
     "price":          (True,  "Interested",     3,    False),
     "not_now":        (True,  "Later",          30,   False),
     "referral":       (True,  "Interested",     4,    True),
+    "says_booked":    (True,  "Interested",     2,    True),
     "not_interested": (False, "Not interested", None, False),
     "sensitive":      (False, "Replied",        None, True),
     "other":          (False, "Replied",        None, True),
@@ -90,10 +96,11 @@ Text from their website (for the audit; may be messy or empty):
 \"\"\"{site}\"\"\"
 
 Classify the new message into exactly one intent and write {first}'s reply. JSON only, keys:
-- "intent": one of wants_audit, ready_to_talk, time_proposed, wants_details, price, not_now, referral,
+- "intent": one of wants_audit, ready_to_talk, time_proposed, says_booked, wants_details, price, not_now, referral,
   not_interested, sensitive, other.
   wants_audit = they said yes / send it / show me the audit or a sample (our email offered a free audit).
   ready_to_talk = they want a call or chat (incl. a phone call). time_proposed = they suggest a day/time.
+  says_booked = they say they already booked a slot on the link.
   wants_details = they ask what we do or how it works. price = they ask about cost.
   not_now = interested later / busy now. referral = they point us to someone else.
   not_interested = no, stop, remove, unsubscribe. sensitive = angry, complaint, spam/legal threat,
@@ -113,6 +120,7 @@ Classify the new message into exactly one intent and write {first}'s reply. JSON
   ready_to_talk: 40-80 words, thank them, give the link, say they can pick Zoom or a phone call there.
   time_proposed: 40-70 words, say that time works for {first} if it's open, and ask them to lock it on the
     link so the invite lands in both calendars.
+  says_booked: 25-50 words, thank them, say {first} is looking forward to it, link only for rescheduling.
   wants_details: 70-120 words, answer plainly (we film/edit cinematic walkthroughs and before/after reveals,
     turn them into Meta ads aimed at homeowners or buyers in their area, and manage the ads), offer the free
     audit, then the link.

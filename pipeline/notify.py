@@ -45,6 +45,13 @@ def action(title, message, tags="rotating_light"):
     push(f"🔴 ACTION: {title}", message, priority="urgent", tags=tags)
 
 
+def check_booking(name, why):
+    """Calendly's booking emails go to Azeem's main Gmail, which the pipeline can't read. So every time a lead
+    gets the booking link, Azeem gets this ping, checks Calendly/his calendar, and tells Claude "X booked"."""
+    push(f"📅 CHECK: did {name} book?", f"{why}\nIf they booked on Calendly, tell Claude \"{name} booked\" "
+         "and it goes to Meeting.", priority="high", tags="calendar")
+
+
 def fyi(title, message, tags=""):
     """Progress only, nothing to do. Silent."""
     push(title, message, priority="low", tags=tags)

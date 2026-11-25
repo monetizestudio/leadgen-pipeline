@@ -304,3 +304,12 @@ def test_wants_site_only_for_audit_like_replies():
     from pipeline import replies
     assert replies.wants_site("Yes please send the audit")
     assert not replies.wants_site("How much do you charge?")
+
+
+def test_check_booking_ping(monkeypatch):
+    from pipeline import notify, playbook
+    sent = []
+    monkeypatch.setattr(notify, "push", lambda t, m, priority="default", tags="": sent.append((t, m, priority)))
+    notify.check_booking("Clamroc", "Audit sent.")
+    assert sent[0][0] == "📅 CHECK: did Clamroc book?" and sent[0][2] == "high" and "Clamroc booked" in sent[0][1]
+    assert playbook.plan("says_booked")["ping"] and "says_booked" in playbook.REPLY_PROMPT

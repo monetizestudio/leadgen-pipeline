@@ -10,6 +10,7 @@ The full reply playbook (which reply gets which answer) lives in pipeline/playbo
 - Sensitive / unclear      -> Gmail draft + loud ping, nothing sent
 - Bounce -> Bounced. Out of office -> ignored, follow-ups continue.
 - Calendly "New Event" email for a lead -> Status Meeting + loud ping (closed lead: Azeem takes the Zoom).
+- Every email that carries the booking link -> "📅 CHECK: did X book?" ping; Azeem confirms -> Claude sets Meeting.
 Follow-up replies are handled too (whole conversation as context), up to playbook.MAX_AUTO_REPLIES per lead.
 Interested leads that don't book get 2 nudges (day 3, day 7). Later leads get one check-in at day 30.
 Outbox: text in a lead's Notion "Send next" field is sent in the same thread on the next run, then cleared.
@@ -252,6 +253,7 @@ def send_nudges():
                                                 "Nudges": {"number": n + 1},
                                                 "Conversation": _log(page, f"WE ({label}): {body[:300]}")})
                 sent += 1
+                notify.check_booking(notion.read(page, "Business"), f"{label.capitalize()} sent with the booking link.")
             except Exception as e:
                 print(f"[nudge] {to}: {config.redact(e)[:120]}")
     return sent
@@ -288,6 +290,8 @@ def send_outbox(latest):
             props["Next follow-up"] = notion.date(dt.date.today() + dt.timedelta(days=3))
         notion.update_page(page["id"], props)
         sent.append(notion.read(page, "Business"))
+        if BOOKING_LINK and BOOKING_LINK in body:
+            notify.check_booking(notion.read(page, "Business"), "Claude's hand-written email with the booking link was sent.")
     return sent
 
 
@@ -329,10 +333,10 @@ def handle_reply(box, page, msg, sender, body, counts):
             counts["auto"].append(f"{name} ({intent})")
             if step["ping"]:
                 notify.action(f"{name}: {intent.replace('_', ' ')}", f"{summary}\nAnswered with the booking link. "
-                              "Watch for the Calendly booking.", tags="fire")
+                              f"If they booked on Calendly, tell Claude \"{name} booked\".", tags="fire")
             else:
-                notify.fyi(f"🔥 {name} replied ({intent.replace('_', ' ')}), answered (nothing to do)", summary,
-                           tags="fire")
+                notify.check_booking(name, f"They replied ({intent.replace('_', ' ')}): {summary}\n"
+                                     "Answered with the booking link.")
             return True
         except Exception as e:
             print(f"[replies] auto-send failed: {config.redact(e)[:120]}")
