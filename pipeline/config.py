@@ -31,6 +31,9 @@ CHECKED_DB = "41e3ff41f39f814ea83dc87b7123cc2f"   # audit log: every business ch
 # The finder qualifies as many businesses as it takes to keep every region stocked.
 REGION_DAILY_NEW = {"australia": 25, "uae": 25, "uk": 25, "na": 25}
 DAILY_TARGET = sum(REGION_DAILY_NEW.values())   # 100 first emails a day
+# UAE overflow (26 Nov 2026): UAE slots its own leads can't fill go to these regions, so the total stays 100.
+OVERFLOW_FROM = "uae"
+OVERFLOW_TO = ["na", "uk", "australia"]   # remainder goes to the first ones listed
 QUEUE_DAYS = 2                # finder keeps this many days of email leads queued per region
 MAX_CANDIDATES = 1500         # stop checking after this many businesses in one night
 MIN_FIT_SCORE = 6             # 1-10, AI fit score needed to qualify
@@ -44,7 +47,8 @@ GEMINI_DELAY_SEC = 7          # pause between AI calls (free tier rate limit)
 # ---------- Countries and cities (rotated each night) ----------
 CITIES = {  # city -> (latitude, longitude) of the centre; search radius below
     "UAE": {"Dubai": (25.2048, 55.2708), "Abu Dhabi": (24.4539, 54.3773), "Sharjah": (25.3463, 55.4209),
-            "Ajman": (25.4052, 55.5136), "Ras Al Khaimah": (25.8007, 55.9762), "Al Ain": (24.2075, 55.7447)},
+            "Ajman": (25.4052, 55.5136), "Ras Al Khaimah": (25.8007, 55.9762), "Al Ain": (24.2075, 55.7447),
+            "Dubai Marina": (25.0805, 55.1403), "Fujairah": (25.1288, 56.3265), "Umm Al Quwain": (25.5647, 55.5552)},
     "UK": {"London": (51.5074, -0.1278), "Manchester": (53.4808, -2.2426), "Birmingham": (52.4862, -1.8904),
            "Leeds": (53.8008, -1.5491), "Bristol": (51.4545, -2.5879), "Glasgow": (55.8642, -4.2518),
            "Liverpool": (53.4084, -2.9916), "Edinburgh": (55.9533, -3.1883)},
@@ -85,6 +89,33 @@ OSM_TAGS = [
     ("office", "estate_agent", "Real Estate"),
     ("shop", "estate_agent", "Real Estate"),
 ]
+
+# Extra map categories searched only in these countries (UAE ran dry on the main list, Nov 2026)
+EXTRA_OSM_TAGS = {
+    "UAE": [
+        ("shop", "furniture", "Interior Design"),
+        ("shop", "curtain", "Interior Design"),
+        ("shop", "lighting", "Interior Design"),
+        ("craft", "carpenter", "Interior Design"),
+        ("office", "construction_company", "Remodeling"),
+        ("craft", "tiler", "Kitchen & Bath"),
+        ("office", "property_management", "Real Estate"),
+    ],
+}
+# Generic "office=company" listings kept only when the name says what they do (UAE fit-out firms list like this)
+COMPANY_NAME_NICHES = {
+    "UAE": [
+        (r"fit[\s-]?out|interior|decor|joinery", "Interior Design"),
+        (r"architect", "Architecture"),
+        (r"kitchen|bath", "Kitchen & Bath"),
+        (r"contracting|renovat|refurbish|construction", "Remodeling"),
+        (r"real estate|realty|propert|homes", "Real Estate"),
+    ],
+}
+# UAE businesses list a mobile number (05x / +971 5x) and use it for WhatsApp, often with no wa.me link
+MOBILE_AS_WHATSAPP = {"UAE": r"(?:\+|00)?971[\s.-]?\(?0?\)?[\s.-]?(5[024568])[\s.-]?(\d{3})[\s.-]?(\d{4})|\b0(5[024568])[\s.-]?(\d{3})[\s.-]?(\d{4})\b"}
+CONTACT_PATHS_EXTRA = {"UAE": ["/en", "/en/contact", "/en/contact-us"]}   # many UAE sites are bilingual
+THIN_CHARS = {"UAE": 120}   # site text needed to judge fit (default 200); UAE sites are often image-heavy
 
 NICHE_WORD = {
     "Architecture": "architecture",

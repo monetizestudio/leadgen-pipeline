@@ -365,3 +365,31 @@ def test_real_limit_is_not_retried(monkeypatch):
     with pytest.raises(smtplib.SMTPDataError):
         m.send("a@shop.com", "Hi", "body")
     assert m.reconnects == 0
+
+
+def test_uae_mobiles_count_as_whatsapp():
+    html = ('<a href="tel:+971501234567">Call</a> Office 04 123 4567. Mobile: 055 765 4321 '
+            '<a href="tel:00971-52-111-2222">x</a> UK +44 7700 900123')
+    _, was, _ = scrape.extract_contacts(html, "https://fitout.ae", "UAE")
+    assert was == ["971501234567", "971521112222", "971557654321"]   # landline and UK number ignored
+    _, was_uk, _ = scrape.extract_contacts(html, "https://studio.co.uk", "UK")
+    assert was_uk == []                                               # only UAE uses this rule
+
+
+def test_uae_overflow_split_keeps_100(monkeypatch):
+    import datetime as dt
+    from pipeline import config, send
+    assert sum(send.overflow_share(r, 25) for r in config.OVERFLOW_TO) == 25
+    assert send.overflow_share("uae", 25) == 0 and send.overflow_share("uk", 0) == 0
+    assert [send.overflow_share(r, 10) for r in config.OVERFLOW_TO] == [4, 3, 3]
+
+    def fake_query(db, f):
+        t = str(f)
+        if "Outreach day', 'date': {'equals'" in t:
+            return [1] * 3                      # UAE contacted 3 today
+        return [{"properties": {}}] * 2 if "WhatsApp" in t else []   # 2 UAE WhatsApp still queued
+    monkeypatch.setattr(send.notion, "query", fake_query)
+    monkeypatch.setattr(send.notion, "read", lambda p, k: "")
+    assert send.uae_shortfall(dt.date(2026, 11, 26)) == 20
+    monkeypatch.setattr(send.config, "region_today", lambda r: dt.date(2026, 11, 26))
+    assert send.daily_goal("na") == 25 + 7 and send.daily_goal("uae") == 25

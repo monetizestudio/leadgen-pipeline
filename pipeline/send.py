@@ -122,7 +122,40 @@ def _uncounted_queued(region, channel):
     return pages
 
 
-def plan(region, today, max_new=None):
+def uae_shortfall(today=None):
+    """UAE slots today that UAE leads can't fill: 25 - (done today + queued and not yet counted).
+    Stable across the day: before the UAE run the queue covers it, after the run 'done' does."""
+    today = today or config.region_today(config.OVERFLOW_FROM)
+    countries = config.REGIONS[config.OVERFLOW_FROM]
+    done = len(notion.query(config.LEADS_DB, {"and": [
+        _countries_filter(countries),
+        {"property": "Outreach day", "date": {"equals": today.isoformat()}}]}))
+    ready = len(_uncounted_queued(config.OVERFLOW_FROM, "WhatsApp")) + \
+        len(_uncounted_queued(config.OVERFLOW_FROM, "Email"))
+    return max(0, config.REGION_DAILY_NEW[config.OVERFLOW_FROM] - done - ready)
+
+
+def overflow_share(region, shortfall):
+    """This region's part of the UAE shortfall, split evenly (remainder to the first regions listed)."""
+    to = config.OVERFLOW_TO
+    if region not in to or shortfall <= 0:
+        return 0
+    base, extra = divmod(shortfall, len(to))
+    return base + (1 if to.index(region) < extra else 0)
+
+
+def daily_goal(region):
+    """Today's new-contact goal: 25, plus a share of whatever UAE can't fill (so the total stays 100)."""
+    goal = config.REGION_DAILY_NEW[region]
+    if region in config.OVERFLOW_TO:
+        try:
+            goal += overflow_share(region, uae_shortfall())
+        except Exception as e:  # never let the overflow check stop a normal run
+            print(f"[send] UAE overflow check failed, sending the normal 25: {config.redact(e)[:120]}")
+    return goal
+
+
+def plan(region, today, max_new=None, goal=None):
     """What this run should do: (follow-ups, WhatsApp leads to save, email leads, done today, still owed).
     A region's 25 a day = WhatsApp leads saved for Azeem's Sunday batch (first priority) + first emails.
     Counting what already went out today (region time, "Outreach day") makes repeat/late runs safe."""
@@ -130,7 +163,8 @@ def plan(region, today, max_new=None):
     done_today = len(notion.query(config.LEADS_DB, {"and": [
         _countries_filter(countries),
         {"property": "Outreach day", "date": {"equals": today.isoformat()}}]}))
-    owed = max(0, config.REGION_DAILY_NEW[region] - done_today)
+    goal = config.REGION_DAILY_NEW[region] if goal is None else goal
+    owed = max(0, goal - done_today)
     if max_new is not None:
         owed = min(owed, max_new)
     whatsapp = _uncounted_queued(region, "WhatsApp")[:owed]
@@ -154,11 +188,12 @@ def _address(page):
 
 def run(region, max_new=None):
     today = config.region_today(region)
-    followups, whatsapp, queued, sent_before, owed = plan(region, today, max_new)
+    goal = daily_goal(region)
+    followups, whatsapp, queued, sent_before, owed = plan(region, today, max_new, goal)
     if not followups and owed == 0:
         print(f"{region}: {sent_before} new emails already sent today and no follow-ups due. Nothing to do.")
         return
-    goal = config.REGION_DAILY_NEW[region]
+    extra = goal - config.REGION_DAILY_NEW[region]
     # WhatsApp first: these just get counted for today and wait for the Sunday bulk send (no follow-ups)
     for page in whatsapp:
         notion.update_page(page["id"], {"Outreach day": notion.date(today)})
@@ -236,6 +271,8 @@ def run(region, max_new=None):
     notes = (f"{region.upper()}: {total_new}/{goal} contacted today. This run: {wa_saved} WhatsApp saved, "
              f"{sent_new} first emails, {sent_fu} follow-ups. {wa_waiting} WhatsApp leads waiting for Sunday. "
              f"Bad addresses skipped: {skipped}. Errors: {len(errors)}. Reconnects: {mailer.reconnects}")
+    if extra:
+        notes += f". Goal includes {extra} extra covering UAE's shortfall"
     if short and not paused:
         notes += f". SHORT: ran out of queued {region.upper()} leads."
     if errors:

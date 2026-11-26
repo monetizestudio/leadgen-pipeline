@@ -47,7 +47,22 @@ def clean_emails(found, site=""):
     return out
 
 
-def extract_contacts(html, site=""):
+def uae_style_mobiles(text, country):
+    """Mobile numbers that count as WhatsApp in this country (UAE: 05x / +971 5x), as 9715XXXXXXXX."""
+    pattern = config.MOBILE_AS_WHATSAPP.get(country)
+    if not pattern or not text:
+        return []
+    out = []
+    for groups in re.findall(pattern, text):
+        digits = "".join(g for g in groups if g)
+        if len(digits) == 9:
+            n = "971" + digits
+            if n not in out:
+                out.append(n)
+    return out
+
+
+def extract_contacts(html, site="", country=""):
     """Return (emails, whatsapp_numbers, visible_text) from one HTML page."""
     soup = BeautifulSoup(html, "html.parser")
     hrefs = " ".join(a.get("href", "") for a in soup.find_all("a"))
@@ -57,6 +72,9 @@ def extract_contacts(html, site=""):
     mailtos = re.findall(r"mailto:([^?\"'\s]+)", hrefs)
     emails = clean_emails(mailtos + EMAIL_RE.findall(text), site)
     was = list(dict.fromkeys(WA_RE.findall(hrefs + " " + text)))
+    for n in uae_style_mobiles(hrefs + " " + text, country):
+        if n not in was:
+            was.append(n)
     return emails, was, text
 
 
@@ -67,15 +85,19 @@ OVERPASS_SERVERS = [
 ]
 
 
-def overpass_businesses(lat, lon, radius=None):
+def overpass_businesses(lat, lon, radius=None, country=""):
     """Businesses in our niches within `radius` metres of a city centre that list a website.
     Tries each free Overpass server in turn; raises if all of them fail."""
     radius = radius or config.SEARCH_RADIUS_M
     around = f"(around:{radius},{lat},{lon})"
-    parts = "".join(
-        f'nwr["{k}"="{v}"][~"^(website|contact:website)$"~"."]{around};'
-        for k, v, _ in config.OSM_TAGS
-    )
+    tags = config.OSM_TAGS + config.EXTRA_OSM_TAGS.get(country, [])
+    has_site = '[~"^(website|contact:website)$"~"."]'
+    parts = "".join(f'nwr["{k}"="{v}"]{has_site}{around};' for k, v, _ in tags)
+    name_rules = config.COMPANY_NAME_NICHES.get(country, [])
+    if name_rules:
+        names = "|".join(rx for rx, _ in name_rules).replace("[\\s-]?", ".?").replace('"', "")
+        parts += f'nwr["office"="company"]["name"~"{names}",i]{has_site}{around};'
+
     q = f"[out:json][timeout:90];({parts});out center tags 400;"
     last_err = "no server answered"
     data = None
@@ -101,30 +123,36 @@ def overpass_businesses(lat, lon, radius=None):
         raise RuntimeError(f"OpenStreetMap search failed ({last_err})")
     out = []
     for el in data.get("elements", []):
-        tags = el.get("tags", {})
-        niche = next((nm for k, v, nm in config.OSM_TAGS if tags.get(k) == v), None)
-        site = normalize_site(tags.get("website") or tags.get("contact:website"))
-        if not (tags.get("name") and site and niche):
+        t = el.get("tags", {})
+        niche = next((nm for k, v, nm in tags if t.get(k) == v), None)
+        if not niche and t.get("office") == "company":
+            niche = next((nm for rx, nm in name_rules if re.search(rx, t.get("name", ""), re.I)), None)
+        phones = " ".join(t.get(k, "") for k in ("contact:whatsapp", "whatsapp", "mobile", "contact:mobile",
+                                                  "phone", "contact:phone"))
+
+        site = normalize_site(t.get("website") or t.get("contact:website"))
+        if not (t.get("name") and site and niche):
             continue
         out.append({
-            "name": tags["name"],
+            "name": t["name"],
             "website": site,
             "niche": niche,
-            "osm_email": tags.get("email") or tags.get("contact:email") or "",
+            "osm_email": t.get("email") or t.get("contact:email") or "",
+            "osm_whatsapp": uae_style_mobiles(phones, country),
         })
     time.sleep(5)  # be gentle with the free Overpass servers
     return out
 
 
-def fetch_site(site):
+def fetch_site(site, country=""):
     """Visit home + contact/about pages. Returns dict with emails, whatsapp, text."""
     emails, was, texts = [], [], []
-    for path in CONTACT_PATHS:
+    for path in CONTACT_PATHS + config.CONTACT_PATHS_EXTRA.get(country, []):
         try:
             r = requests.get(urljoin(site + "/", path.lstrip("/")), headers=UA, timeout=15)
             if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):
                 continue
-            e, w, t = extract_contacts(r.text, site)
+            e, w, t = extract_contacts(r.text, site, country)
             emails += [x for x in e if x not in emails]
             was += [x for x in w if x not in was]
             texts.append(t[:3000])

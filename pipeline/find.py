@@ -11,7 +11,7 @@ import datetime as dt
 import time
 import traceback
 
-from . import ai, config, messages, notion, notify, scrape
+from . import ai, config, messages, notion, notify, scrape, send
 
 
 def region_cities(region, day=None):
@@ -91,7 +91,7 @@ class Region:
                 self.cities = region_cities(self.name)
             country, city, (lat, lon) = self.cities.pop(0)
             try:
-                found = scrape.overpass_businesses(lat, lon, self.passes[0])
+                found = scrape.overpass_businesses(lat, lon, self.passes[0], country)
             except Exception as e:  # one city failing shouldn't stop the night
                 self.errors.append(f"{city}: {config.redact(e)[:120]}")
                 print(f"skip {self.errors[-1]}")
@@ -122,9 +122,12 @@ def check_one(reg, country, city, biz, seen):
         return
     seen.add(biz["website"])
     lead = {**biz, "city": city, "country": country}
-    site = scrape.fetch_site(lead["website"])
+    site = scrape.fetch_site(lead["website"], country)
     if biz["osm_email"]:
         site["emails"] = scrape.clean_emails([biz["osm_email"]] + site["emails"], lead["website"])
+    if country in config.MOBILE_AS_WHATSAPP:  # UAE: the map listing's mobile number is almost always WhatsApp
+        extra = [n for n in biz.get("osm_whatsapp", []) if n not in site["whatsapp"]]
+        site["whatsapp"] = site["whatsapp"] + extra
     email = site["emails"][0] if site["emails"] else ""
     if notion.lead_exists(lead["website"], email):
         c["duplicate"] += 1      # already in Leads: never contact twice
@@ -136,7 +139,7 @@ def check_one(reg, country, city, biz, seen):
         notion.log_checked(lead, "No contact", "No email or WhatsApp on website or map listing")
         return
     c["had_contact"] += 1
-    if len(site["text"]) < 200:
+    if len(site["text"]) < config.THIN_CHARS.get(country, 200):
         c["thin"] += 1
         notion.log_checked(lead, "Thin website", "Website had too little text to judge", has_e, has_w)
         return
@@ -158,8 +161,14 @@ def run(limit=None):
     started = time.time()
     target = config.QUEUE_DAYS
     regions = []
+    try:  # today's UAE gap is the best guess for tomorrow's: stock the other regions to cover it
+        uae_gap = send.uae_shortfall()
+    except Exception as e:
+        uae_gap = 0
+        print(f"UAE shortfall check failed: {config.redact(e)[:120]}")
     for name, per_day in config.REGION_DAILY_NEW.items():
         have = queued_ready(name)
+        per_day += send.overflow_share(name, uae_gap)
         regions.append(Region(name, max(0, per_day * target - have)))
         print(f"{name}: {have} leads ready, need {regions[-1].need} more")
     if limit:  # test run: spread a small total across regions
