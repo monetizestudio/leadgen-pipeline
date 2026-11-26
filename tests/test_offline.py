@@ -313,3 +313,55 @@ def test_check_booking_ping(monkeypatch):
     notify.check_booking("Clamroc", "Audit sent.")
     assert sent[0][0] == "📅 CHECK: did Clamroc book?" and sent[0][2] == "high" and "Clamroc booked" in sent[0][1]
     assert playbook.plan("says_booked")["ping"] and "says_booked" in playbook.REPLY_PROMPT
+
+
+def test_dropped_connection_reconnects_not_pauses(monkeypatch):
+    import smtplib
+    from pipeline import send
+    monkeypatch.setattr(send.time, "sleep", lambda s: None)
+    expired = smtplib.SMTPServerDisconnected("(421, b'4.7.0 Connection expired, try reconnecting.')")
+    assert send.is_dropped(expired) and not send.is_limit(expired)
+    assert send.is_dropped(smtplib.SMTPSenderRefused(421, b"4.7.0 Connection expired, try reconnecting", "x"))
+    assert send.is_limit(smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded"))
+    assert send.is_limit(smtplib.SMTPAuthenticationError(535, b"Username and Password not accepted"))
+
+    sent, logins = [], []
+
+    class FakeSMTP:
+        def __init__(self, fail_first):
+            self.fail_first = fail_first
+        def send_message(self, msg):
+            if self.fail_first:
+                self.fail_first = False
+                raise expired
+            sent.append(msg["To"])
+        def quit(self):
+            pass
+
+    def connect():
+        logins.append(1)
+        return FakeSMTP(fail_first=len(logins) == 1)   # first session is stale
+
+    m = send.Mailer(connect=connect)
+    m.send("a@shop.com", "Hi", "body")
+    m.send("b@shop.com", "Hi", "body")
+    assert sent == ["a@shop.com", "b@shop.com"] and len(logins) == 2 and m.reconnects == 1
+
+
+def test_real_limit_is_not_retried(monkeypatch):
+    import smtplib
+    import pytest
+    from pipeline import send
+    monkeypatch.setattr(send.time, "sleep", lambda s: None)
+    limit = smtplib.SMTPDataError(550, b"5.4.5 Daily user sending limit exceeded")
+
+    class Limited:
+        def send_message(self, msg):
+            raise limit
+        def quit(self):
+            pass
+
+    m = send.Mailer(connect=Limited)
+    with pytest.raises(smtplib.SMTPDataError):
+        m.send("a@shop.com", "Hi", "body")
+    assert m.reconnects == 0

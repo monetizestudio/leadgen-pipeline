@@ -45,8 +45,70 @@ def _fields(page):
                            notion.read(page, "Niche"), notion.read(page, "City"), "")
 
 
-GMAIL_LIMIT_SIGNS = ("421", "4.7.0", "5.4.5", "sending limit", "quota", "rate limit", "unusual",
-                     "temporarily", "suspended")
+GMAIL_LIMIT_SIGNS = ("5.4.5", "sending limit", "quota", "rate limit", "unusual", "suspended",
+                     "try again later", "temporarily", "4.7.0")
+# Gmail drops an SMTP session that stays open for a long run ("421 4.7.0 Connection expired").
+# That is not a limit: log in again and resend. Only pause if Gmail still refuses on a fresh login.
+DROPPED_SIGNS = ("connection expired", "try reconnecting", "connection unexpectedly closed",
+                 "server not connected", "connection reset", "broken pipe", "timed out")
+
+
+def is_dropped(err):
+    if isinstance(err, (smtplib.SMTPServerDisconnected, ConnectionError, TimeoutError)):
+        return True
+    return any(sign in str(err).lower() for sign in DROPPED_SIGNS)
+
+
+def is_limit(err):
+    if isinstance(err, smtplib.SMTPAuthenticationError):
+        return True             # app password rejected: stop and tell Azeem
+    if is_dropped(err):
+        return False
+    return any(sign in str(err).lower() for sign in GMAIL_LIMIT_SIGNS)
+
+
+class Mailer:
+    """Gmail SMTP that logs in again whenever the connection has gone stale."""
+
+    def __init__(self, connect=None):
+        self._connect = connect or self._gmail
+        self.smtp = None
+        self.reconnects = 0
+
+    @staticmethod
+    def _gmail():
+        smtp = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60)
+        smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
+        return smtp
+
+    def _fresh(self):
+        self.close()
+        self.smtp = self._connect()
+
+    def send(self, to, subject, body):
+        if self.smtp is None:
+            self._fresh()
+        for attempt in range(3):
+            try:
+                return _send(self.smtp, to, subject, body)
+            except smtplib.SMTPRecipientsRefused:
+                raise
+            except Exception as e:
+                # dropped session, or a 421 that may just be the old session: reconnect and retry
+                if attempt == 2 or not (is_dropped(e) or "421" in str(e)):
+                    raise
+                print(f"[send] connection dropped ({config.redact(e)[:80]}), logging in again")
+                self.reconnects += 1
+                time.sleep(5 * (attempt + 1))
+                self._fresh()
+
+    def close(self):
+        if self.smtp is not None:
+            try:
+                self.smtp.quit()
+            except Exception:
+                pass
+            self.smtp = None
 
 
 def _uncounted_queued(region, channel):
@@ -110,20 +172,18 @@ def run(region, max_new=None):
 
     sent_new, sent_fu, skipped, errors = 0, 0, 0, []
     paused = ""
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
-        smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
-
+    mailer = Mailer()
+    try:
         def limit_hit(err):
-            text = str(err).lower()
-            return config.redact(err)[:200] if any(sign in text for sign in GMAIL_LIMIT_SIGNS) else ""
+            return config.redact(err)[:200] if is_limit(err) else ""
 
         for page, touch in followups:
             to = _address(page)
             if not to:
                 continue
             try:
-                _send(smtp, to, "Re: " + notion.read(page, "Subject"),
-                      messages.followup_email(_fields(page), touch))
+                mailer.send(to, "Re: " + notion.read(page, "Subject"),
+                            messages.followup_email(_fields(page), touch))
                 notion.update_page(page["id"], {"Touches": {"number": touch}, "Last touch": notion.date(today)})
                 sent_fu += 1
             except Exception as e:  # keep going, one bad address shouldn't stop the run
@@ -143,7 +203,7 @@ def run(region, max_new=None):
                 skipped += 1
                 continue
             try:
-                _send(smtp, to, notion.read(page, "Subject"), notion.read(page, "Message"))
+                mailer.send(to, notion.read(page, "Subject"), notion.read(page, "Message"))
                 notion.update_page(page["id"], {
                     "Email": {"email": to},
                     "Status": notion.select("Contacted"),
@@ -163,6 +223,8 @@ def run(region, max_new=None):
                 if paused:
                     break
             time.sleep(random.randint(*config.SEND_DELAY_SEC))
+    finally:
+        mailer.close()
 
     wa_waiting = len(notion.query(config.LEADS_DB, {"and": [
         _countries_filter(config.REGIONS[region]),
@@ -173,7 +235,7 @@ def run(region, max_new=None):
     result = "Failed" if paused else ("Partial" if short or errors else "Done")
     notes = (f"{region.upper()}: {total_new}/{goal} contacted today. This run: {wa_saved} WhatsApp saved, "
              f"{sent_new} first emails, {sent_fu} follow-ups. {wa_waiting} WhatsApp leads waiting for Sunday. "
-             f"Bad addresses skipped: {skipped}. Errors: {len(errors)}")
+             f"Bad addresses skipped: {skipped}. Errors: {len(errors)}. Reconnects: {mailer.reconnects}")
     if short and not paused:
         notes += f". SHORT: ran out of queued {region.upper()} leads."
     if errors:
@@ -182,7 +244,7 @@ def run(region, max_new=None):
         notes = f"GMAIL PAUSED SENDING, stopped to protect the account: {paused}. " + notes
     notion.log_run(f"Send {region} {today}", "Directories send", goal, total_new, result, notes)
     if paused:
-        notify.action("Gmail limit hit, sending paused", notes, tags="no_entry")
+        notify.action("Gmail stopped sending, run paused", notes, tags="no_entry")
     else:
         flag = "⚠️ " if short else "✉️ "
         notify.fyi(f"{flag}{region.upper()} done {total_new}/{goal}: {sent_new} emails + {wa_saved} WhatsApp",
