@@ -85,45 +85,60 @@ OVERPASS_SERVERS = [
 ]
 
 
-def overpass_businesses(lat, lon, radius=None, country=""):
-    """Businesses in our niches within `radius` metres of a city centre that list a website.
-    Tries each free Overpass server in turn; raises if all of them fail."""
-    radius = radius or config.SEARCH_RADIUS_M
-    around = f"(around:{radius},{lat},{lon})"
-    tags = config.OSM_TAGS + config.EXTRA_OSM_TAGS.get(country, [])
-    has_site = '[~"^(website|contact:website)$"~"."]'
-    parts = "".join(f'nwr["{k}"="{v}"]{has_site}{around};' for k, v, _ in tags)
-    name_rules = config.COMPANY_NAME_NICHES.get(country, [])
-    if name_rules:
-        names = "|".join(rx for rx, _ in name_rules).replace("[\\s-]?", ".?").replace('"', "")
-        parts += f'nwr["office"="company"]["name"~"{names}",i]{has_site}{around};'
-
-    q = f"[out:json][timeout:60];({parts});out center tags 400;"
-    deadline = time.time() + 240          # give up on a city after 4 min, so one slow city can't eat the night
-    last_err = "no server answered"
-    data = None
+def _ask_overpass(q, deadline):
+    """Run one Overpass query, trying each free server in turn. Raises with every server's error."""
+    errors = []
     for server in OVERPASS_SERVERS:
         for attempt in range(2):
             if time.time() > deadline:
-                break
+                errors.append("out of time")
+                raise RuntimeError("; ".join(errors))
             try:
-                r = requests.post(server, data={"data": q}, headers=UA, timeout=75)
+                r = requests.post(server, data={"data": q}, headers=UA, timeout=120)
             except requests.RequestException as e:
-                last_err = f"{server}: {e}"
+                errors.append(f"{server.split('/')[2]}: {type(e).__name__}")
                 break
             if r.status_code in (429, 502, 503, 504):
-                last_err = f"{server}: HTTP {r.status_code}"
+                errors.append(f"{server.split('/')[2]}: HTTP {r.status_code}")
                 time.sleep(15 * (attempt + 1))
                 continue
             if r.status_code != 200:
-                last_err = f"{server}: HTTP {r.status_code}"
+                errors.append(f"{server.split('/')[2]}: HTTP {r.status_code}")
                 break
-            data = r.json()
-            break
-        if data is not None:
-            break
-    if data is None:
-        raise RuntimeError(f"OpenStreetMap search failed ({last_err})")
+            return r.json()
+    raise RuntimeError("; ".join(errors) or "no server answered")
+
+
+def overpass_businesses(lat, lon, radius=None, country=""):
+    """Businesses in our niches within `radius` metres of a city centre that list a website.
+    The main niche list is one query (as it always was); a country's extra categories are a second,
+    separate query, so if the extras are slow or fail the main search still works."""
+    radius = radius or config.SEARCH_RADIUS_M
+    around = f"(around:{radius},{lat},{lon})"
+    has_site = '[~"^(website|contact:website)$"~"."]'
+    extra = config.EXTRA_OSM_TAGS.get(country, [])
+    tags = config.OSM_TAGS + extra
+    name_rules = config.COMPANY_NAME_NICHES.get(country, [])
+
+    def query(tag_list, more=""):
+        parts = "".join(f'nwr["{k}"="{v}"]{has_site}{around};' for k, v, _ in tag_list) + more
+        return f"[out:json][timeout:90];({parts});out center tags 400;"
+
+    deadline = time.time() + 360          # give up on a city after 6 min, so one slow city can't eat the night
+    try:
+        data = _ask_overpass(query(config.OSM_TAGS), deadline)
+    except RuntimeError as e:
+        raise RuntimeError(f"OpenStreetMap search failed ({e})")
+    more = ""
+    if name_rules:
+        names = "|".join(rx for rx, _ in name_rules).replace("[\\s-]?", ".?").replace('"', "")
+        more = f'nwr["office"="company"]["name"~"{names}",i]{has_site}{around};'
+    if extra or more:
+        try:
+            data["elements"] = data.get("elements", []) + \
+                _ask_overpass(query(extra, more), deadline).get("elements", [])
+        except RuntimeError as e:  # extras are a bonus: keep the main results
+            print(f"extra categories skipped ({e})")
     out = []
     for el in data.get("elements", []):
         t = el.get("tags", {})

@@ -393,3 +393,26 @@ def test_uae_overflow_split_keeps_100(monkeypatch):
     assert send.uae_shortfall(dt.date(2026, 11, 26)) == 20
     monkeypatch.setattr(send.config, "region_today", lambda r: dt.date(2026, 11, 26))
     assert send.daily_goal("na") == 25 + 7 and send.daily_goal("uae") == 25
+
+
+def test_overpass_extras_fail_but_main_search_works(monkeypatch):
+    calls = []
+
+    class R:
+        def __init__(self, code, data=None):
+            self.status_code, self._d = code, data
+        def json(self):
+            return self._d
+
+    def fake_post(url, data, headers, timeout):
+        calls.append(data["data"])
+        if '"shop"="furniture"' in data["data"]:
+            return R(400)                                  # the extra UAE query fails everywhere
+        return R(200, {"elements": [{"tags": {"name": "Arc Studio", "office": "architect",
+                                              "website": "arc.ae", "phone": "+971 50 123 4567"}}]})
+    monkeypatch.setattr(scrape.requests, "post", fake_post)
+    monkeypatch.setattr(scrape.time, "sleep", lambda s: None)
+    out = scrape.overpass_businesses(25.2, 55.3, 20000, "UAE")
+    assert [b["name"] for b in out] == ["Arc Studio"]
+    assert out[0]["osm_whatsapp"] == ["971501234567"]
+    assert not any('"shop"="furniture"' in q for q in calls[:1])   # main query has no extras
