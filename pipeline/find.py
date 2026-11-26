@@ -81,9 +81,11 @@ class Region:
     def short(self):
         return max(0, self.need - self.c["email"] - self.c["whatsapp"])
 
-    def refill(self, seen):
+    def refill(self, seen, out_of_time=lambda: False):
         """Load the next city's businesses. False when every city (both radii) is used up."""
         while not self.queue:
+            if out_of_time():
+                return True              # the main loop sees the time limit and stops
             if not self.cities:
                 self.passes.pop(0)
                 if not self.passes:
@@ -185,7 +187,7 @@ def run(limit=None):
     while active and not out_of_time():
         active.sort(key=lambda r: -r.short)        # region furthest from its target goes first
         reg = active[0]
-        if not reg.refill(seen):
+        if not reg.refill(seen, out_of_time):
             active.remove(reg)                     # this region has nothing left to search
             continue
         for _ in range(config.CITY_CHUNK):

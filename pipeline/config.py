@@ -104,13 +104,9 @@ EXTRA_OSM_TAGS = {
 }
 # Generic "office=company" listings kept only when the name says what they do (UAE fit-out firms list like this)
 COMPANY_NAME_NICHES = {
-    "UAE": [
-        (r"fit[\s-]?out|interior|decor|joinery", "Interior Design"),
-        (r"architect", "Architecture"),
-        (r"kitchen|bath", "Kitchen & Bath"),
-        (r"contracting|renovat|refurbish|construction", "Remodeling"),
-        (r"real estate|realty|propert|homes", "Real Estate"),
-    ],
+    # "UAE": [(r"fit[\s-]?out|interior|decor|joinery", "Interior Design"), ...]
+    # Turned off 27 Nov 2026: the name-regex search over every office=company was too slow on the free
+    # Overpass servers and stalled the 26 Nov night run. Format: country -> [(regex, niche), ...]
 }
 # UAE businesses list a mobile number (05x / +971 5x) and use it for WhatsApp, often with no wa.me link
 MOBILE_AS_WHATSAPP = {"UAE": r"(?:\+|00)?971[\s.-]?\(?0?\)?[\s.-]?(5[024568])[\s.-]?(\d{3})[\s.-]?(\d{4})|\b0(5[024568])[\s.-]?(\d{3})[\s.-]?(\d{4})\b"}

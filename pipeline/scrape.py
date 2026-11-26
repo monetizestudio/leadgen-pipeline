@@ -98,13 +98,16 @@ def overpass_businesses(lat, lon, radius=None, country=""):
         names = "|".join(rx for rx, _ in name_rules).replace("[\\s-]?", ".?").replace('"', "")
         parts += f'nwr["office"="company"]["name"~"{names}",i]{has_site}{around};'
 
-    q = f"[out:json][timeout:90];({parts});out center tags 400;"
+    q = f"[out:json][timeout:60];({parts});out center tags 400;"
+    deadline = time.time() + 240          # give up on a city after 4 min, so one slow city can't eat the night
     last_err = "no server answered"
     data = None
     for server in OVERPASS_SERVERS:
         for attempt in range(2):
+            if time.time() > deadline:
+                break
             try:
-                r = requests.post(server, data={"data": q}, headers=UA, timeout=120)
+                r = requests.post(server, data={"data": q}, headers=UA, timeout=75)
             except requests.RequestException as e:
                 last_err = f"{server}: {e}"
                 break
@@ -147,7 +150,10 @@ def overpass_businesses(lat, lon, radius=None, country=""):
 def fetch_site(site, country=""):
     """Visit home + contact/about pages. Returns dict with emails, whatsapp, text."""
     emails, was, texts = [], [], []
+    deadline = time.time() + 60             # a slow site gets at most a minute
     for path in CONTACT_PATHS + config.CONTACT_PATHS_EXTRA.get(country, []):
+        if time.time() > deadline:
+            break
         try:
             r = requests.get(urljoin(site + "/", path.lstrip("/")), headers=UA, timeout=15)
             if r.status_code != 200 or "text/html" not in r.headers.get("content-type", ""):

@@ -25,6 +25,7 @@ jobs:
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
       SENDER_ADDRESS: ${{ secrets.SENDER_ADDRESS }}
+      PYTHONUNBUFFERED: "1"         # logs show up live and survive a cancelled run
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
